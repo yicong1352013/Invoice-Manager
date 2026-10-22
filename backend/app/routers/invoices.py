@@ -8,7 +8,9 @@ from sqlalchemy import select, func
 from decimal import Decimal
 
 from app.database import get_db
+from app.auth import can_access_invoice, get_current_user
 from app.models.invoice import Invoice, OcrResult, LlmResult, ParsingDiff, InvoiceStatus
+from app.models.user import User, UserRole
 from app.schemas.invoice import (
     InvoiceResponse, InvoiceListResponse, InvoiceDetailResponse,
     InvoiceUpdate, BatchUpdateRequest, BatchDeleteRequest, StatisticsResponse, UploadResponse,
@@ -20,6 +22,12 @@ from app.rate_limit import limiter
 
 settings = get_settings()
 router = APIRouter()
+
+
+def _check_invoice_access(invoice: Invoice, user: User) -> None:
+    """404 (not 403) so unowned invoice existence is not leaked."""
+    if not can_access_invoice(user, invoice.owner):
+        raise HTTPException(status_code=404, detail="发票不存在")
 
 
 def _parse_invoice_ids(invoice_ids: Optional[str]) -> Optional[List[int]]:
@@ -54,7 +62,8 @@ async def upload_invoices(
     request: Request,
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """上传发票文件 (支持多文件)，上传后异步触发OCR解析"""
     results = []
@@ -91,6 +100,7 @@ async def upload_invoices(
             file_name=file.filename or "unknown",
             file_type=ext,
             file_data=content,
+            owner=current_user.username,
             status=InvoiceStatus.UPLOADED
         )
         db.add(invoice)
@@ -104,6 +114,7 @@ async def upload_invoices(
             entity_type="invoice",
             entity_id=invoice.id,
             action="upload",
+            user_id=current_user.username,
             new_value={"file_name": invoice.file_name, "file_type": ext, "file_size": len(content)},
             ip_address=client_info.get("ip_address"),
             user_agent=client_info.get("user_agent"),
@@ -227,15 +238,19 @@ async def list_invoices(
     owner: Optional[str] = Query(None, description="归属人筛选"),
     start_date: Optional[str] = Query(None, description="开始日期"),
     end_date: Optional[str] = Query(None, description="结束日期"),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """获取发票列表"""
+    """获取发票列表（普通用户仅可见自己上传的发票）"""
     query = select(Invoice)
 
     # Apply filters
     if status:
         query = query.where(Invoice.status == status)
-    if owner:
+    if current_user.role != UserRole.ADMIN:
+        # Non-admins are always scoped to their own invoices
+        query = query.where(Invoice.owner == current_user.username)
+    elif owner:
         query = query.where(Invoice.owner == owner)
     if start_date:
         try:
@@ -274,9 +289,10 @@ async def get_statistics(
     invoice_ids: Optional[str] = Query(None, description="发票ID列表，逗号分隔"),
     status: Optional[InvoiceStatus] = Query(None, description="状态筛选"),
     owner: Optional[str] = Query(None, description="归属人筛选"),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """获取发票统计数据"""
+    """获取发票统计数据（普通用户仅统计自己的发票）"""
     query = select(Invoice)
 
     ids = _parse_invoice_ids(invoice_ids)
@@ -284,7 +300,9 @@ async def get_statistics(
         query = query.where(Invoice.id.in_(ids))
     if status:
         query = query.where(Invoice.status == status)
-    if owner:
+    if current_user.role != UserRole.ADMIN:
+        query = query.where(Invoice.owner == current_user.username)
+    elif owner:
         query = query.where(Invoice.owner == owner)
 
     result = await db.execute(query)
@@ -306,7 +324,8 @@ async def get_statistics(
 @router.get("/{invoice_id}", response_model=InvoiceDetailResponse)
 async def get_invoice(
     invoice_id: int,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """获取发票详情"""
     query = select(Invoice).where(Invoice.id == invoice_id)
@@ -315,6 +334,7 @@ async def get_invoice(
 
     if not invoice:
         raise HTTPException(status_code=404, detail="发票不存在")
+    _check_invoice_access(invoice, current_user)
 
     # Load related data
     ocr_query = select(OcrResult).where(OcrResult.invoice_id == invoice_id)
@@ -364,7 +384,8 @@ async def get_invoice(
 @router.get("/{invoice_id}/file")
 async def get_invoice_file(
     invoice_id: int,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """获取发票原始文件"""
     from fastapi.responses import Response
@@ -376,6 +397,7 @@ async def get_invoice_file(
 
     if not invoice:
         raise HTTPException(status_code=404, detail="发票不存在")
+    _check_invoice_access(invoice, current_user)
 
     content_type_map = {
         "pdf": "application/pdf",
@@ -401,7 +423,8 @@ async def update_invoice(
     invoice_id: int,
     update_data: InvoiceUpdate,
     request: Request,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """更新发票信息"""
     query = select(Invoice).where(Invoice.id == invoice_id)
@@ -410,6 +433,11 @@ async def update_invoice(
 
     if not invoice:
         raise HTTPException(status_code=404, detail="发票不存在")
+    _check_invoice_access(invoice, current_user)
+
+    # Ownership transfer is admin-only; non-admins keep the original owner
+    if "owner" in update_data.model_dump(exclude_unset=True) and current_user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="只有管理员可以修改发票归属人")
 
     # Capture old values for audit
     update_dict = update_data.model_dump(exclude_unset=True)
@@ -459,12 +487,19 @@ async def update_invoice(
 async def batch_update_invoices(
     request: Request,
     batch_request: BatchUpdateRequest,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """批量更新发票状态/归属人"""
+    if batch_request.owner is not None and current_user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="只有管理员可以修改发票归属人")
+
     query = select(Invoice).where(Invoice.id.in_(batch_request.invoice_ids))
     result = await db.execute(query)
-    invoices = result.scalars().all()
+    invoices = [
+        inv for inv in result.scalars().all()
+        if can_access_invoice(current_user, inv.owner)
+    ]
 
     client_info = get_client_info(request)
     updated_count = 0
@@ -506,16 +541,20 @@ async def batch_update_invoices(
 async def batch_delete_invoices(
     request: Request,
     batch_request: BatchDeleteRequest,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """批量删除发票及其关联数据"""
     if not batch_request.invoice_ids:
         raise HTTPException(status_code=400, detail="请选择要删除的发票")
 
-    # Query invoices to delete
+    # Query invoices to delete (ownership-filtered)
     query = select(Invoice).where(Invoice.id.in_(batch_request.invoice_ids))
     result = await db.execute(query)
-    invoices = result.scalars().all()
+    invoices = [
+        inv for inv in result.scalars().all()
+        if can_access_invoice(current_user, inv.owner)
+    ]
 
     if not invoices:
         raise HTTPException(status_code=404, detail="未找到要删除的发票")
@@ -550,7 +589,8 @@ async def batch_reprocess_invoices(
     request: Request,
     background_tasks: BackgroundTasks,
     batch_request: BatchDeleteRequest,  # Reuse for invoice_ids
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """批量重新解析发票（清除旧的OCR/LLM结果，重新处理）"""
     import logging
@@ -559,10 +599,13 @@ async def batch_reprocess_invoices(
     if not batch_request.invoice_ids:
         raise HTTPException(status_code=400, detail="请选择要重新解析的发票")
 
-    # Query invoices to reprocess
+    # Query invoices to reprocess (ownership-filtered)
     query = select(Invoice).where(Invoice.id.in_(batch_request.invoice_ids))
     result = await db.execute(query)
-    invoices = result.scalars().all()
+    invoices = [
+        inv for inv in result.scalars().all()
+        if can_access_invoice(current_user, inv.owner)
+    ]
 
     if not invoices:
         raise HTTPException(status_code=404, detail="未找到要重新解析的发票")
@@ -617,7 +660,8 @@ async def batch_reprocess_invoices(
 @router.post("/{invoice_id}/process")
 async def process_invoice(
     invoice_id: int,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """处理发票：运行OCR解析"""
     from app.services.invoice_service import process_invoice as do_process
@@ -628,6 +672,7 @@ async def process_invoice(
 
     if not invoice:
         raise HTTPException(status_code=404, detail="发票不存在")
+    _check_invoice_access(invoice, current_user)
 
     success = await do_process(invoice_id, db)
 
@@ -641,7 +686,8 @@ async def process_invoice(
 async def delete_invoice(
     invoice_id: int,
     request: Request,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """删除发票"""
     query = select(Invoice).where(Invoice.id == invoice_id)
@@ -650,6 +696,7 @@ async def delete_invoice(
 
     if not invoice:
         raise HTTPException(status_code=404, detail="发票不存在")
+    _check_invoice_access(invoice, current_user)
 
     # Audit log
     client_info = get_client_info(request)
@@ -675,11 +722,20 @@ async def resolve_diff(
     diff_id: int,
     resolve_request: ResolveDiffRequest,
     request: Request,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """解决解析差异，选择OCR、LLM或自定义值"""
     from datetime import datetime
     from decimal import Decimal as Dec
+
+    # Ownership check on the invoice before touching its diff
+    invoice_query = select(Invoice).where(Invoice.id == invoice_id)
+    invoice_result = await db.execute(invoice_query)
+    invoice = invoice_result.scalar_one_or_none()
+    if not invoice:
+        raise HTTPException(status_code=404, detail="发票不存在")
+    _check_invoice_access(invoice, current_user)
 
     # Get the diff
     diff_query = select(ParsingDiff).where(
@@ -781,7 +837,8 @@ async def resolve_diff(
 async def confirm_invoice(
     invoice_id: int,
     request: Request,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """确认发票，标记所有差异为已解决。"""
     # Get invoice
@@ -791,6 +848,7 @@ async def confirm_invoice(
 
     if not invoice:
         raise HTTPException(status_code=404, detail="发票不存在")
+    _check_invoice_access(invoice, current_user)
 
     critical_fields = [
         "invoice_number",
@@ -869,7 +927,8 @@ async def export_invoices_csv(
     owner: Optional[str] = Query(None, description="归属人筛选"),
     start_date: Optional[str] = Query(None, description="开始日期"),
     end_date: Optional[str] = Query(None, description="结束日期"),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """导出发票为CSV格式"""
     import csv
@@ -882,7 +941,9 @@ async def export_invoices_csv(
         query = query.where(Invoice.id.in_(ids))
     if status:
         query = query.where(Invoice.status == status)
-    if owner:
+    if current_user.role != UserRole.ADMIN:
+        query = query.where(Invoice.owner == current_user.username)
+    elif owner:
         query = query.where(Invoice.owner == owner)
     start_date_obj = _parse_date_param(start_date, "start_date")
     if start_date_obj:
@@ -952,7 +1013,8 @@ async def export_invoices_excel(
     owner: Optional[str] = Query(None, description="归属人筛选"),
     start_date: Optional[str] = Query(None, description="开始日期"),
     end_date: Optional[str] = Query(None, description="结束日期"),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """导出发票为Excel格式"""
     from urllib.parse import quote
@@ -970,7 +1032,9 @@ async def export_invoices_excel(
         query = query.where(Invoice.id.in_(ids))
     if status:
         query = query.where(Invoice.status == status)
-    if owner:
+    if current_user.role != UserRole.ADMIN:
+        query = query.where(Invoice.owner == current_user.username)
+    elif owner:
         query = query.where(Invoice.owner == owner)
     start_date_obj = _parse_date_param(start_date, "start_date")
     if start_date_obj:

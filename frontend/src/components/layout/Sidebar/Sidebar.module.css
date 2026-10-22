@@ -145,6 +145,24 @@
   color: var(--muted-foreground);
 }
 
+/* Logout Button */
+.logoutButton {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-base);
+  flex-shrink: 0;
+  transition: all var(--transition-fast);
+}
+
+.logoutButton:hover {
+  background-color: var(--surface);
+  color: var(--foreground);
+}
+
 /* LLM Config Button */
 .llmConfigButton {
   display: flex;

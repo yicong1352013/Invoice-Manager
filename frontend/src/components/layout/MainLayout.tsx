@@ -3,9 +3,12 @@ import { Alert, Button } from 'antd';
 import { RocketOutlined } from '@ant-design/icons';
 import Sidebar from './Sidebar';
 import styles from './MainLayout.module.css';
+import type { User } from '../../types/user';
 
 interface MainLayoutProps {
   children: ReactNode;
+  user: User;
+  onLogout: () => void;
   llmConfigured: boolean | null;
   showLlmPromo: boolean;
   onOpenLLMConfig: () => void;
@@ -14,6 +17,8 @@ interface MainLayoutProps {
 
 export default function MainLayout({
   children,
+  user,
+  onLogout,
   llmConfigured,
   showLlmPromo,
   onOpenLLMConfig,
@@ -21,7 +26,12 @@ export default function MainLayout({
 }: MainLayoutProps) {
   return (
     <div className={styles.layoutContainer}>
-      <Sidebar llmConfigured={llmConfigured} onOpenLLMConfig={onOpenLLMConfig} />
+      <Sidebar
+        user={user}
+        onLogout={onLogout}
+        llmConfigured={llmConfigured}
+        onOpenLLMConfig={onOpenLLMConfig}
+      />
 
       <main className={styles.mainContent}>
         <div className={styles.contentWrapper}>

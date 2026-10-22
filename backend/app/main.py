@@ -4,7 +4,7 @@ from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 
 from app.config import get_settings
-from app.routers import health, invoices, settings as settings_router
+from app.routers import auth as auth_router, users as users_router, health, invoices, settings as settings_router
 from app.rate_limit import limiter
 
 settings = get_settings()
@@ -37,15 +37,46 @@ app.add_middleware(
 
 # Include routers
 app.include_router(health.router, prefix="/api", tags=["Health"])
+app.include_router(auth_router.router, prefix="/api/auth", tags=["Auth"])
+app.include_router(users_router.router, prefix="/api/users", tags=["Users"])
 app.include_router(invoices.router, prefix="/api/invoices", tags=["Invoices"])
 app.include_router(settings_router.router, prefix="/api/settings", tags=["Settings"])
+
+
+async def _seed_admin() -> None:
+    """Create the initial admin account from env vars (idempotent)."""
+    from sqlalchemy import select
+
+    from app.auth import hash_password
+    from app.database import async_session_maker
+    from app.models.user import User, UserRole
+
+    settings = get_settings()
+    if not settings.admin_username or not settings.admin_password:
+        return
+
+    async with async_session_maker() as db:
+        existing = await db.execute(
+            select(User).where(User.username == settings.admin_username)
+        )
+        if existing.scalar_one_or_none():
+            return
+        db.add(User(
+            username=settings.admin_username,
+            password_hash=hash_password(settings.admin_password),
+            role=UserRole.ADMIN,
+            enabled=True,
+        ))
+        await db.commit()
 
 
 @app.on_event("startup")
 async def startup():
     from app.database import engine, Base
+    from app.models.user import User  # noqa: F401 - register table with Base.metadata
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await _seed_admin()
 
 
 @app.get("/")

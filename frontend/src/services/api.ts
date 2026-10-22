@@ -11,6 +11,13 @@ import type {
   LLMTestResponse,
   ModelsResponse,
 } from '../types/invoice';
+import type { User, LoginResponse, UserCreateRequest, UserUpdateRequest } from '../types/user';
+
+const TOKEN_KEY = 'im_token';
+
+export const getToken = (): string | null => localStorage.getItem(TOKEN_KEY);
+export const setToken = (token: string) => localStorage.setItem(TOKEN_KEY, token);
+export const clearToken = () => localStorage.removeItem(TOKEN_KEY);
 
 const api = axios.create({
   baseURL: '/api',
@@ -18,6 +25,62 @@ const api = axios.create({
     'Content-Type': 'application/json',
   },
 });
+
+// Attach JWT to every request
+api.interceptors.request.use((config) => {
+  const token = getToken();
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
+// On 401 (expired/invalid token): drop session and go to login.
+// Skip for the login request itself so failures show as form errors.
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    const isLoginRequest = error.config?.url?.includes('/auth/login');
+    if (error.response?.status === 401 && !isLoginRequest && getToken()) {
+      clearToken();
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login';
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
+// Auth APIs
+export const login = async (username: string, password: string): Promise<LoginResponse> => {
+  const response = await api.post('/auth/login', { username, password });
+  return response.data;
+};
+
+export const getCurrentUser = async (): Promise<User> => {
+  const response = await api.get('/auth/me');
+  return response.data;
+};
+
+// User management APIs (admin only)
+export const listUsers = async (): Promise<User[]> => {
+  const response = await api.get('/users');
+  return response.data;
+};
+
+export const createUser = async (body: UserCreateRequest): Promise<User> => {
+  const response = await api.post('/users', body);
+  return response.data;
+};
+
+export const updateUser = async (id: number, body: UserUpdateRequest): Promise<User> => {
+  const response = await api.patch(`/users/${id}`, body);
+  return response.data;
+};
+
+export const deleteUser = async (id: number): Promise<void> => {
+  await api.delete(`/users/${id}`);
+};
 
 // Health check
 export const healthCheck = async () => {
@@ -61,9 +124,10 @@ export const getInvoice = async (id: number): Promise<InvoiceDetail> => {
   return response.data;
 };
 
-// Get invoice file URL
+// Get invoice file URL (token via query param so iframe/img src can authenticate)
 export const getInvoiceFileUrl = (id: number): string => {
-  return `/api/invoices/${id}/file`;
+  const token = getToken();
+  return `/api/invoices/${id}/file${token ? `?token=${encodeURIComponent(token)}` : ''}`;
 };
 
 // Update invoice

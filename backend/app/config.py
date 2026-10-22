@@ -7,6 +7,12 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "postgresql+asyncpg://postgres:postgres@db:5432/invoice_db"
 
+    # Auth
+    secret_key: str = ""  # JWT signing key; empty = ephemeral key (sessions reset on restart)
+    jwt_expire_hours: int = 24
+    admin_username: str = ""  # Initial admin seeded on first startup
+    admin_password: str = ""
+
     # LLM Provider Configuration
     # Supported providers: openai, anthropic, google, qwen, deepseek, zhipu
     llm_provider: str = ""  # Active provider (empty = not configured)

@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Optional, List
 from pydantic import BaseModel
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException, Header
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +80,8 @@ def _require_llm_config_token(
         raise HTTPException(status_code=401, detail="未授权")
 
 from app.config import get_settings, clear_settings_cache
+from app.auth import get_current_user, require_admin
+from app.models.user import User
 from app.services.llm_service import get_llm_service, reset_llm_service, PROVIDERS
 from app.services.model_registry import get_models_with_fallback
 
@@ -141,7 +143,9 @@ DEFAULT_MODELS = {
 
 
 @router.get("/llm/status", response_model=LLMStatusResponse)
-async def get_llm_status():
+async def get_llm_status(
+    _current_user: User = Depends(get_current_user),
+):
     """Get LLM configuration status."""
     settings = get_settings()
     llm_service = get_llm_service()
@@ -175,6 +179,7 @@ async def configure_llm(
     request: LLMConfigRequest,
     x_llm_config_token: Optional[str] = Header(default=None, alias="X-LLM-Config-Token"),
     authorization: Optional[str] = Header(default=None),
+    _admin: User = Depends(require_admin),
 ):
     """Configure an LLM provider and persist to .env file."""
     provider = request.provider.lower()
@@ -245,7 +250,9 @@ async def configure_llm(
 
 
 @router.post("/llm/test")
-async def test_llm_connection():
+async def test_llm_connection(
+    _admin: User = Depends(require_admin),
+):
     """Test the current LLM configuration with a simple request."""
     llm_service = get_llm_service()
 
@@ -372,7 +379,10 @@ def _test_openai_compatible(client, model: str) -> str:
 
 
 @router.post("/llm/test-config", response_model=ConfigTestResponse)
-async def test_llm_config(request: ConfigTestRequest):
+async def test_llm_config(
+    request: ConfigTestRequest,
+    _admin: User = Depends(require_admin),
+):
     """Test LLM configuration before saving using the actual provider client library."""
     import time
 
@@ -496,7 +506,8 @@ class ModelsResponse(BaseModel):
 @router.get("/models", response_model=ModelsResponse)
 async def get_available_models(
     provider: Optional[str] = None,
-    vision_only: bool = False
+    vision_only: bool = False,
+    _current_user: User = Depends(get_current_user),
 ):
     """Get available models, optionally filtered by provider or vision capability.
 

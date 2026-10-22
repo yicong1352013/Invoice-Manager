@@ -3,8 +3,10 @@ import { Tooltip } from 'antd';
 import {
   CheckCircleOutlined,
   ExclamationCircleOutlined,
+  LogoutOutlined,
 } from '@ant-design/icons';
 import styles from './Sidebar.module.css';
+import type { User } from '../../../types/user';
 
 interface NavItem {
   path: string;
@@ -12,17 +14,20 @@ interface NavItem {
 }
 
 interface SidebarProps {
+  user: User;
+  onLogout: () => void;
   llmConfigured: boolean | null;
   onOpenLLMConfig: () => void;
 }
 
-const navItems: NavItem[] = [
-  { path: '/', label: '发票列表' },
-  { path: '/upload', label: '上传发票' },
-];
-
-export default function Sidebar({ llmConfigured, onOpenLLMConfig }: SidebarProps) {
+export default function Sidebar({ user, onLogout, llmConfigured, onOpenLLMConfig }: SidebarProps) {
   const location = useLocation();
+
+  const navItems: NavItem[] = [
+    { path: '/', label: '发票列表' },
+    { path: '/upload', label: '上传发票' },
+    ...(user.role === 'admin' ? [{ path: '/users', label: '用户管理' }] : []),
+  ];
 
   return (
     <aside className={styles.sidebar}>
@@ -80,12 +85,22 @@ export default function Sidebar({ llmConfigured, onOpenLLMConfig }: SidebarProps
       <div className={styles.sidebarBottom}>
         <div className={styles.userProfile}>
           <div className={styles.userAvatar}>
-            <span className={styles.userInitial}>S</span>
+            <span className={styles.userInitial}>{user.username.slice(0, 1).toUpperCase()}</span>
           </div>
           <div className={styles.userInfo}>
-            <span className={styles.userName}>Stone</span>
-            <span className={styles.userRole}>管理员</span>
+            <span className={styles.userName}>{user.username}</span>
+            <span className={styles.userRole}>{user.role === 'admin' ? '管理员' : '普通用户'}</span>
           </div>
+          <Tooltip title="退出登录" placement="top">
+            <button
+              className={styles.logoutButton}
+              onClick={onLogout}
+              aria-label="退出登录"
+              style={{ border: 'none', background: 'none', cursor: 'pointer' }}
+            >
+              <LogoutOutlined style={{ color: 'var(--muted-foreground)', fontSize: 14 }} />
+            </button>
+          </Tooltip>
         </div>
       </div>
     </aside>
