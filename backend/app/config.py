@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     ocr_max_workers: int = 8   # CPU-bound: ~2x typical core count
     llm_max_workers: int = 15  # I/O-bound: limited by API rate limits
 
+    # OCR-first gate: skip the LLM fallback when local OCR confidence is at
+    # or above this value AND all critical fields are present
+    ocr_accept_confidence: float = 85.0
+
     # App
     debug: bool = True
 

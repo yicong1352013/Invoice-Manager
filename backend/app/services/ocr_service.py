@@ -26,10 +26,10 @@ class OCRService:
 
     @property
     def ocr(self):
-        """Lazy-load PaddleOCR instance (thread-safe)."""
+        """Lazy-load PaddleOCR instance (thread-safe, version-adaptive)."""
         if self._ocr is None:
             with self._init_lock:
-                # Double-check after acquiring lock
+                # Double-check after acquiring the lock
                 if self._ocr is None:
                     from paddleocr import PaddleOCR
                     import logging as log_module
@@ -37,54 +37,112 @@ class OCRService:
                     log_module.getLogger('ppocr').setLevel(log_module.WARNING)
                     log_module.getLogger('paddlex').setLevel(log_module.WARNING)
                     logger.info("Initializing PaddleOCR...")
-                    self._ocr = PaddleOCR(
-                        use_angle_cls=True,
-                        lang='ch',
-                    )
+                    # PaddleOCR 3.x renamed use_angle_cls -> use_textline_orientation;
+                    # fall back for 2.x installs. enable_mkldnn=False avoids
+                    # Windows CPU oneDNN PIR bugs in PaddlePaddle 3.x.
+                    try:
+                        self._ocr = PaddleOCR(
+                            use_textline_orientation=True,
+                            lang='ch',
+                            enable_mkldnn=False,
+                        )
+                    except TypeError:
+                        self._ocr = PaddleOCR(
+                            use_angle_cls=True,
+                            lang='ch',
+                            enable_mkldnn=False,
+                        )
                     logger.info("PaddleOCR initialized successfully")
         return self._ocr
 
-    def _extract_text_from_result(self, result) -> Tuple[List[str], List[float], List[Dict[str, Any]]]:
-        """Extract text, confidences, and line metadata from OCR result (v2.x API)."""
-        text_lines: List[str] = []
-        confidences: List[float] = []
-        line_items: List[Dict[str, Any]] = []
+    def _invoke_ocr(self, image_array) -> list:
+        """Run recognition on one image, adapting to the installed PaddleOCR API.
 
-        if not result:
-            return text_lines, confidences, line_items
+        Returns a normalized list of (text, confidence, poly) tuples.
 
-        # PaddleOCR v2.x returns list of [bbox, (text, confidence)]
-        for item in result:
+        - PaddleOCR 3.x: predict() returns OCRResult objects exposing
+          rec_texts / rec_scores / rec_polys
+        - PaddleOCR 2.x: ocr() returns [[bbox, (text, confidence)], ...]
+        """
+        if hasattr(self.ocr, "predict"):
+            results = self.ocr.predict(image_array)
+            normalized: list = []
+            for item in results or []:
+                texts, scores, polys = self._parse_predict_item(item)
+                for text, score, poly in zip(texts, scores, polys):
+                    if text:
+                        normalized.append((text, score, poly))
+            if normalized:
+                return normalized
+            # predict() existed but yielded nothing usable — fall through to 2.x
+
+        result = self.ocr.ocr(image_array, cls=True)
+        if result and result[0]:
+            result = result[0]
+        legacy: list = []
+        for item in result or []:
             if isinstance(item, list) and len(item) >= 2:
                 bbox = item[0]
                 if isinstance(item[1], tuple) and len(item[1]) >= 2:
                     text, confidence = item[1]
-                    if not text:
-                        continue
+                    if text:
+                        legacy.append((text, confidence, bbox))
+        return legacy
 
-                    conf_score = confidence * 100 if confidence <= 1.0 else confidence
-                    text_lines.append(text)
-                    confidences.append(conf_score)
+    def _parse_predict_item(self, item) -> tuple:
+        """Extract (texts, scores, polys) from a PaddleOCR 3.x result item."""
+        texts: List[str] = []
+        scores: List[float] = []
+        polys: List[Any] = []
 
-                    if isinstance(bbox, list) and len(bbox) >= 4:
-                        xs = [point[0] for point in bbox if isinstance(point, (list, tuple)) and len(point) >= 2]
-                        ys = [point[1] for point in bbox if isinstance(point, (list, tuple)) and len(point) >= 2]
-                        if xs and ys:
-                            min_x = min(xs)
-                            max_x = max(xs)
-                            min_y = min(ys)
-                            max_y = max(ys)
-                            line_items.append({
-                                "text": text,
-                                "confidence": conf_score,
-                                "bbox": bbox,
-                                "min_x": min_x,
-                                "max_x": max_x,
-                                "min_y": min_y,
-                                "max_y": max_y,
-                                "center_x": (min_x + max_x) / 2,
-                                "center_y": (min_y + max_y) / 2,
-                            })
+        data = None
+        json_attr = getattr(item, "json", None)
+        if isinstance(json_attr, dict):
+            data = json_attr.get("res", json_attr)
+        elif isinstance(item, dict):
+            data = item.get("res", item)
+        if data is None:
+            return texts, scores, polys
+
+        texts = list(data.get("rec_texts") or [])
+        raw_scores = list(data.get("rec_scores") or [])
+        scores = [
+            (s * 100 if s is not None and s <= 1.0 else (s or 0.0)) for s in raw_scores
+        ]
+        polys = list(data.get("rec_polys") or data.get("dt_polys") or [])
+
+        # Pad polys so zip keeps alignment even when missing
+        while len(polys) < len(texts):
+            polys.append([])
+        return texts, scores, polys
+
+    def _build_line_items(self, normalized: list) -> Tuple[List[str], List[float], List[Dict[str, Any]]]:
+        """Build line metadata from normalized (text, confidence, poly) items."""
+        text_lines: List[str] = []
+        confidences: List[float] = []
+        line_items: List[Dict[str, Any]] = []
+
+        for text, confidence, poly in normalized:
+            conf_score = confidence * 100 if confidence <= 1.0 else confidence
+            text_lines.append(text)
+            confidences.append(conf_score)
+
+            xs = [p[0] for p in poly if isinstance(p, (list, tuple)) and len(p) >= 2]
+            ys = [p[1] for p in poly if isinstance(p, (list, tuple)) and len(p) >= 2]
+            if xs and ys:
+                min_x, max_x = min(xs), max(xs)
+                min_y, max_y = min(ys), max(ys)
+                line_items.append({
+                    "text": text,
+                    "confidence": conf_score,
+                    "bbox": poly,
+                    "min_x": min_x,
+                    "max_x": max_x,
+                    "min_y": min_y,
+                    "max_y": max_y,
+                    "center_x": (min_x + max_x) / 2,
+                    "center_y": (min_y + max_y) / 2,
+                })
 
         return text_lines, confidences, line_items
 
@@ -107,12 +165,8 @@ class OCRService:
             image = Image.open(BytesIO(image_data))
             image_array = np.array(image)
 
-            # PaddleOCR v2.x uses ocr() method
-            result = self.ocr.ocr(image_array, cls=True)
-            if result and result[0]:
-                result = result[0]
-
-            text_lines, confidences, line_items = self._extract_text_from_result(result)
+            normalized = self._invoke_ocr(image_array)
+            text_lines, confidences, line_items = self._build_line_items(normalized)
             line_items = self._sort_lines_by_position(line_items)
             combined_text = "\n".join([line["text"] for line in line_items] or text_lines)
             avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
@@ -215,13 +269,8 @@ class OCRService:
 
             for image in images:
                 image_array = np.array(image)
-
-                # PaddleOCR v2.x uses ocr() method
-                result = self.ocr.ocr(image_array, cls=True)
-                if result and result[0]:
-                    result = result[0]
-
-                text_lines, confidences, line_items = self._extract_text_from_result(result)
+                normalized = self._invoke_ocr(image_array)
+                text_lines, confidences, line_items = self._build_line_items(normalized)
                 all_text.extend(text_lines)
                 all_confidences.extend(confidences)
                 all_lines.extend(line_items)
@@ -257,9 +306,10 @@ class FieldExtractor:
         # Format is typically *类别*商品名称, we want to capture "类别*商品名称"
         # Example: *家具*办公椅 → captures "家具*办公椅"
         'item_name': r'\*([^*\n]+(?:\*[^*\n]+)*)',
-        'total_with_tax': r'(?:小写|价税合计)[）)（(]*\s*[¥￥]\s*([\d,.]+)',
-        'amount': r'(?:合\s*计|金\s*额)\s*[¥￥]?\s*([\d,.]+)',
-        'tax_amount': r'(?:税\s*额\s*[¥￥]?\s*([\d,.]+)|[¥￥]\s*[\d,.]+\s*[¥￥]\s*([\d,.]+))',
+        # [¥￥Y□]: ¥ is sometimes misrecognized as Y or □ by OCR
+        'total_with_tax': r'(?:小写|价税合计)[）)（(]*\s*[¥￥Y□]?\s*([\d][\d,.]*)',
+        'amount': r'(?:合\s*计|金\s*额)\s*[¥￥Y□]?\s*([\d][\d,.]*)',
+        'tax_amount': r'(?:税\s*额\s*[¥￥Y□]?\s*([\d,.]+)|[¥￥Y□]\s*[\d,.]+\s*[¥￥Y□]\s*([\d,.]+))',
         'tax_rate': r'(?:税率[/／征收率]*[：:]?\s*|金额\n)(\d+%?|免税)',
     }
 

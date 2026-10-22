@@ -1,8 +1,9 @@
-"""Invoice processing service."""
+"""Invoice processing service: OCR-first pipeline with LLM fallback."""
 
 import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
@@ -38,6 +39,29 @@ COMPARABLE_FIELDS = [
     'tax_rate',
 ]
 
+# Fields that must all be present for the OCR result to count as sufficient
+# (same set that drives auto-confirm, so a sufficient OCR result can go
+# straight to CONFIRMED without paying for an LLM call)
+CRITICAL_FIELDS = [
+    'invoice_number',
+    'issue_date',
+    'total_with_tax',
+    'buyer_name',
+    'buyer_tax_id',
+    'seller_name',
+    'seller_tax_id',
+    'item_name',
+]
+
+
+@dataclass
+class OcrOutcome:
+    """Normalized result of one OCR engine run."""
+    engine: str                                   # 'local' | 'baidu'
+    raw_text: str
+    confidence: Optional[float]                   # None when engine gives no score
+    fields: Dict[str, Any] = field(default_factory=dict)
+
 
 def _reset_extracted_fields(invoice: Invoice) -> None:
     """Reset extracted fields to avoid stale values on reprocess."""
@@ -45,39 +69,70 @@ def _reset_extracted_fields(invoice: Invoice) -> None:
         setattr(invoice, field_name, None)
 
 
-def _run_ocr(file_data: bytes, file_type: str) -> Tuple[str, float, Dict[str, Any]]:
-    """Run OCR processing in a separate thread.
+def _run_ocr(
+    engine: str,
+    baidu_api_key: Optional[str],
+    baidu_secret_key: Optional[str],
+    file_data: bytes,
+    file_type: str,
+) -> OcrOutcome:
+    """Run the selected OCR engine in a worker thread."""
+    if engine == "baidu":
+        if not baidu_api_key or not baidu_secret_key:
+            raise RuntimeError("百度云 OCR 凭据未配置，请先在设置页填写")
+        from app.services.baidu_ocr_service import BaiduCloudOCRService
+        service = BaiduCloudOCRService(baidu_api_key, baidu_secret_key)
+        if file_type == 'pdf':
+            raw_text, fields = service.process_pdf(file_data)
+        else:
+            raw_text, fields = service.process_image(file_data)
+        return OcrOutcome(engine="baidu", raw_text=raw_text, confidence=None, fields=fields)
 
-    Args:
-        file_data: Raw file bytes
-        file_type: File type (pdf, jpg, png, etc.)
-
-    Returns:
-        Tuple of (raw_text, confidence, extracted_fields)
-    """
     ocr_service = get_ocr_service()
     extractor = get_field_extractor()
-
     if file_type == 'pdf':
         raw_text, confidence, ocr_lines = ocr_service.process_pdf(file_data)
     else:
         raw_text, confidence, ocr_lines = ocr_service.process_image(file_data)
+    fields = extractor.extract_fields(raw_text, ocr_lines)
+    return OcrOutcome(engine="local", raw_text=raw_text, confidence=confidence, fields=fields)
 
-    ocr_fields = extractor.extract_fields(raw_text, ocr_lines)
-    return raw_text, confidence, ocr_fields
+
+def _ocr_sufficient(outcome: OcrOutcome, accept_confidence: float) -> bool:
+    """OCR-first gate: complete critical fields + acceptable confidence.
+
+    Engines without a confidence score (Baidu structured API) are judged by
+    field completeness alone.
+    """
+    if any(not outcome.fields.get(name) for name in CRITICAL_FIELDS):
+        return False
+    if outcome.confidence is None:
+        return True
+    return outcome.confidence >= accept_confidence
+
+
+def _run_llm_fallback(
+    llm_service: LLMService,
+    ocr_raw_text: str,
+    file_data: bytes,
+    file_type: str,
+) -> Dict[str, Any]:
+    """LLM fallback when OCR is insufficient.
+
+    Vision-capable providers read the image directly; text-only providers
+    (e.g. cheap domestic chat models) parse the OCR raw text instead.
+    """
+    if not llm_service.is_available:
+        return {}
+
+    if llm_service.supports_vision():
+        return _run_llm_vision(llm_service, file_data, file_type)
+
+    return llm_service.parse_invoice_from_text(ocr_raw_text)
 
 
 def _run_llm_vision(llm_service: LLMService, file_data: bytes, file_type: str) -> Dict[str, Any]:
-    """Run LLM vision parsing in a separate thread.
-
-    Args:
-        llm_service: LLM service bound to the active provider
-        file_data: Raw file bytes
-        file_type: File type (pdf, jpg, png, etc.)
-
-    Returns:
-        Dictionary of extracted fields
-    """
+    """Run LLM vision parsing (image input) in a worker thread."""
     if not llm_service.is_available or not llm_service.supports_vision():
         return {}
 
@@ -130,11 +185,15 @@ def _has_meaningful_fields(fields: Dict[str, Any]) -> bool:
 
 
 async def process_invoice(invoice_id: int, db: AsyncSession) -> bool:
-    """Process an invoice: run OCR and LLM vision in parallel, then compare results.
+    """Process an invoice with the OCR-first pipeline.
 
-    This function runs OCR and LLM vision parsing in parallel for better performance
-    and more accurate results. The LLM analyzes the image directly instead of
-    relying on OCR text.
+    1. Run the selected OCR engine (local PaddleOCR or Baidu Cloud).
+    2. If the OCR result is sufficient (all critical fields + confidence),
+       finish without any LLM call (zero API cost).
+    3. Otherwise fall back to the LLM: vision models read the image directly,
+       text-only models parse the OCR raw text.
+    4. When both sources produced results, compare them; conflicts or missing
+       critical fields send the invoice to REVIEWING (unchanged semantics).
 
     Args:
         invoice_id: ID of the invoice to process
@@ -143,6 +202,13 @@ async def process_invoice(invoice_id: int, db: AsyncSession) -> bool:
     Returns:
         True if processing succeeded, False otherwise
     """
+    from app.models.provider import (
+        SETTING_BAIDU_OCR_API_KEY,
+        SETTING_BAIDU_OCR_SECRET_KEY,
+        SETTING_OCR_ENGINE,
+    )
+    from app.services.provider_service import get_setting
+
     try:
         # Get invoice
         query = select(Invoice).where(Invoice.id == invoice_id)
@@ -159,47 +225,54 @@ async def process_invoice(invoice_id: int, db: AsyncSession) -> bool:
         await db.execute(delete(OcrResult).where(OcrResult.invoice_id == invoice_id))
         logger.info(f"Cleared existing processing results for invoice {invoice_id}")
 
-        # Run OCR and LLM vision in PARALLEL using separate thread pools
-        loop = asyncio.get_running_loop()
-
-        # Build the LLM service from the active DB provider before hitting threads
+        # Resolve engine + LLM service from DB settings before hitting threads
+        engine = await get_setting(db, SETTING_OCR_ENGINE, "local") or "local"
+        baidu_key = await get_setting(db, SETTING_BAIDU_OCR_API_KEY)
+        baidu_secret = await get_setting(db, SETTING_BAIDU_OCR_SECRET_KEY)
         llm_service = LLMService(await get_active_provider_row(db))
 
-        # Create tasks for parallel execution
-        # OCR uses CPU-bound pool, LLM uses I/O-bound pool
-        ocr_task = loop.run_in_executor(
-            _ocr_executor, _run_ocr, invoice.file_data, invoice.file_type
+        loop = asyncio.get_running_loop()
+
+        # Step 1: OCR (CPU-bound pool)
+        outcome = await loop.run_in_executor(
+            _ocr_executor, _run_ocr, engine, baidu_key, baidu_secret,
+            invoice.file_data, invoice.file_type,
         )
-        llm_task = loop.run_in_executor(
-            _llm_executor, _run_llm_vision, llm_service, invoice.file_data, invoice.file_type
+        logger.info(
+            f"OCR ({outcome.engine}) completed: {len(outcome.fields)} fields, "
+            f"confidence={outcome.confidence}"
         )
 
-        # Wait for both tasks to complete
-        logger.info(f"Running OCR and LLM vision in parallel for invoice {invoice_id}")
-        ocr_result_data, llm_fields = await asyncio.gather(ocr_task, llm_task)
+        # Step 2: LLM fallback only when OCR is insufficient (I/O-bound pool)
+        llm_fields: Dict[str, Any] = {}
+        if _ocr_sufficient(outcome, settings.ocr_accept_confidence):
+            logger.info(f"Invoice {invoice_id}: OCR sufficient, skipping LLM (zero API cost)")
+        elif llm_service.is_available:
+            llm_fields = await loop.run_in_executor(
+                _llm_executor, _run_llm_fallback, llm_service,
+                outcome.raw_text, invoice.file_data, invoice.file_type,
+            )
+        else:
+            logger.info(f"Invoice {invoice_id}: OCR insufficient and no LLM configured")
 
-        # Unpack OCR results
-        raw_text, confidence, ocr_fields = ocr_result_data
         has_llm = _has_meaningful_fields(llm_fields)
-
-        logger.info(f"OCR completed: {len(ocr_fields)} fields extracted")
-        logger.info(f"LLM vision completed: {len(llm_fields)} fields extracted (has_llm={has_llm})")
+        logger.info(f"LLM fallback completed (has_llm={has_llm})")
 
         # Save OCR result
         ocr_result = OcrResult(
             invoice_id=invoice_id,
-            raw_text=raw_text,
-            invoice_number=ocr_fields.get('invoice_number'),
-            issue_date=ocr_fields.get('issue_date'),
-            buyer_name=ocr_fields.get('buyer_name'),
-            buyer_tax_id=ocr_fields.get('buyer_tax_id'),
-            seller_name=ocr_fields.get('seller_name'),
-            seller_tax_id=ocr_fields.get('seller_tax_id'),
-            item_name=ocr_fields.get('item_name'),
-            total_with_tax=ocr_fields.get('total_with_tax'),
-            amount=ocr_fields.get('amount'),
-            tax_amount=ocr_fields.get('tax_amount'),
-            tax_rate=ocr_fields.get('tax_rate'),
+            raw_text=outcome.raw_text,
+            invoice_number=outcome.fields.get('invoice_number'),
+            issue_date=outcome.fields.get('issue_date'),
+            buyer_name=outcome.fields.get('buyer_name'),
+            buyer_tax_id=outcome.fields.get('buyer_tax_id'),
+            seller_name=outcome.fields.get('seller_name'),
+            seller_tax_id=outcome.fields.get('seller_tax_id'),
+            item_name=outcome.fields.get('item_name'),
+            total_with_tax=outcome.fields.get('total_with_tax'),
+            amount=outcome.fields.get('amount'),
+            tax_amount=outcome.fields.get('tax_amount'),
+            tax_rate=outcome.fields.get('tax_rate'),
         )
         db.add(ocr_result)
 
@@ -220,11 +293,9 @@ async def process_invoice(invoice_id: int, db: AsyncSession) -> bool:
                 tax_rate=llm_fields.get('tax_rate'),
             )
             db.add(llm_result)
-        else:
-            logger.info(f"LLM vision not available - invoice {invoice_id} using OCR-only flow")
 
         # Compare OCR and LLM results, create diffs
-        final_fields, diffs = _compare_and_resolve(ocr_fields, llm_fields, has_llm)
+        final_fields, diffs = _compare_and_resolve(outcome.fields, llm_fields, has_llm)
 
         # Clear extracted fields so missing values don't keep stale data
         _reset_extracted_fields(invoice)
@@ -245,22 +316,9 @@ async def process_invoice(invoice_id: int, db: AsyncSession) -> bool:
         # Update invoice with final data
         _update_invoice_from_fields(invoice, final_fields)
 
-        # Set status based on whether review is needed
-        # Check for conflicts in diffs
+        # Set status based on whether review is needed (unchanged semantics)
         has_conflicts = any(d['needs_review'] for d in diffs)
-
-        # Check for missing critical fields (these require review)
-        critical_fields = [
-            'invoice_number',
-            'issue_date',
-            'total_with_tax',
-            'buyer_name',
-            'buyer_tax_id',
-            'seller_name',
-            'seller_tax_id',
-            'item_name',
-        ]
-        missing_fields = [f for f in critical_fields if not final_fields.get(f)]
+        missing_fields = [f for f in CRITICAL_FIELDS if not final_fields.get(f)]
         missing_critical = bool(missing_fields)
         if missing_critical:
             logger.warning(f"Invoice {invoice_id} missing critical fields: {missing_fields}")

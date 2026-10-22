@@ -10,10 +10,10 @@ alembic==1.13.1
 psycopg2-binary==2.9.9
 
 # OCR - using headless OpenCV for Docker
-# Pin to v2.x for stable API and numpy 1.x for opencv compatibility
-numpy<2.0
-paddlepaddle==2.6.2
-paddleocr==2.7.3
+# PaddleOCR 3.x (PP-OCRv5) with PaddlePaddle 3.x; numpy range widened to match
+numpy>=1.26,<2.3
+paddlepaddle>=3.0,<4.0
+paddleocr>=3.0,<4.0
 opencv-python-headless>=4.8.0
 
 # LLM (optional SDKs loaded lazily per provider protocol)

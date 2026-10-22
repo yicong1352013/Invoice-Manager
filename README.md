@@ -18,10 +18,10 @@
 
 <br/>
 
-> 🎯 **不只是OCR，是让AI帮你双重检查每一张发票**
+> 🎯 **不只是OCR，是先省钱再兜底的发票识别流水线**
 >
-> 传统OCR识别率只有70-80%，商业方案价格昂贵。Invoice Manager 使用 **OCR + LLM 双源验证**，
-> 让两个AI互相校验，准确率大幅提升，而且完全免费开源！
+> 传统OCR识别率只有70-80%，商业方案价格昂贵。Invoice Manager 采用 **OCR 优先、LLM 兜底** 流水线：
+> 清晰发票本地 PaddleOCR 直接完成（零 API 成本），识别不达标才调用 LLM 复核比对，而且完全免费开源！
 
 </div>
 
@@ -29,20 +29,20 @@
 
 ## ✨ Highlights
 
-- **🔍 Dual-Source Verification** - OCR + LLM double-check every field, conflicts auto-flagged for review
-- **🤖 Multi-LLM Support** - GPT-4o / Claude / Gemini / Qwen / DeepSeek / Zhipu GLM
-- **🇨🇳 Chinese Invoice Optimized** - PaddleOCR + custom prompts for VAT invoices (增值税发票)
-- **⚡ Parallel Processing** - OCR and LLM run simultaneously for faster results
-- **🐳 One-Click Deploy** - Docker Compose, ready in 3 minutes
+- **🔍 OCR-First with LLM Fallback** - Local PaddleOCR first (zero API cost), LLM double-check only when needed
+- **🤖 Multi-LLM Support** - Any OpenAI/Anthropic-compatible endpoint: GPT-4o / Claude / Gemini / Qwen / DeepSeek / Zhipu GLM + custom
+- **☁️ Optional Baidu Cloud OCR** - Switch to Baidu's VAT-invoice API when you need cloud-grade accuracy
+- **🇨🇳 Chinese Invoice Optimized** - PaddleOCR PP-OCRv5 + custom prompts for VAT invoices (增值税发票)
+- **👥 Multi-User with Roles** - Local accounts, admin/user roles, owner-scoped invoice access
 - **🔒 Privacy First** - Self-hosted, your data never leaves your server
 
 ## ✨ 亮点
 
-- **🔍 双源验证** - OCR + LLM 双重识别，字段冲突自动标记待审核
-- **🤖 多模型支持** - 支持 GPT-4o / Claude / Gemini / 通义千问 / DeepSeek / 智谱GLM
-- **🇨🇳 中文发票优化** - PaddleOCR 深度优化 + 增值税发票专用提示词
-- **⚡ 并行处理** - OCR 和 LLM 同时运行，识别更快
-- **🐳 一键部署** - Docker Compose 启动，3分钟搞定
+- **🔍 OCR 优先、LLM 兜底** - 清晰发票零成本识别，不达标才调用 LLM 复核比对
+- **🤖 多模型支持** - 任意 OpenAI/Anthropic 兼容端点：GPT-4o / Claude / Gemini / 通义千问 / DeepSeek / 智谱GLM + 自定义
+- **☁️ 可选百度云端识别** - 无 GPU 或需要更高精度时切换百度智能云增值税发票识别
+- **🇨🇳 中文发票优化** - PaddleOCR PP-OCRv5 深度优化 + 增值税发票专用提示词
+- **👥 多用户权限** - 本地账号 + 管理员/普通用户角色 + 发票按归属人隔离
 - **🔒 数据安全** - 本地私有部署，数据不离开服务器
 
 ---
@@ -169,36 +169,44 @@
                               │  Invoice Upload  │
                               └────────┬────────┘
                                        │
-                    ┌──────────────────┼──────────────────┐
-                    │                  │                  │
-                    ▼                  │                  ▼
-           ┌───────────────┐           │         ┌───────────────┐
-           │   PaddleOCR   │           │         │   LLM Vision  │
-           │   中文OCR识别  │           │         │  GPT-4/Claude │
-           └───────┬───────┘           │         └───────┬───────┘
-                   │                   │                 │
-                   │         ┌────────────────┐          │
-                   └────────►│  智能比对引擎  │◄─────────┘
-                             │ Diff Engine   │
-                             └───────┬───────┘
-                                     │
-                    ┌────────────────┼────────────────┐
-                    ▼                                 ▼
-           ┌───────────────┐                 ┌───────────────┐
-           │   ✅ 匹配      │                 │   ⚠️ 冲突     │
-           │  自动确认      │                 │  人工复核     │
-           │  CONFIRMED    │                 │  REVIEWING    │
-           └───────────────┘                 └───────────────┘
+                                       ▼
+                       ┌──────────────────────────┐
+                       │      OCR 引擎（优先）      │
+                       │  本地 PaddleOCR 3.x (默认) │
+                       │  或 百度智能云·增值税发票   │
+                       └────────────┬─────────────┘
+                                    │
+                     达标？（关键字段齐全+置信度）
+                       │                    │
+                  达标 ↓                    ↓ 不达标
+           ┌───────────────┐    ┌───────────────────┐
+           │   ✅ 直接完成   │    │   LLM 兜底 (可选)   │
+           │  零 LLM 成本    │    │  视觉模型读图 /     │
+           │  CONFIRMED     │    │  文本模型解析OCR原文 │
+           └───────────────┘    └─────────┬─────────┘
+                                          │
+                              ┌────────────────┐
+                              │  智能比对引擎    │
+                              │  Diff Engine   │
+                              └───────┬────────┘
+                                      │
+                     ┌────────────────┼────────────────┐
+                     ▼                                 ▼
+            ┌───────────────┐                 ┌───────────────┐
+            │   ✅ 匹配      │                 │   ⚠️ 冲突     │
+            │  自动确认      │                 │  人工复核     │
+            │  CONFIRMED    │                 │  REVIEWING    │
+            └───────────────┘                 └───────────────┘
 ```
 
-**Why Dual-Source Verification Works | 为什么双源验证更准确**
+**Why OCR-First Works | 为什么 OCR 优先、LLM 兜底**
 
-| 场景 | 单一OCR | 单一LLM | 双源验证 |
-|-----|--------|---------|---------|
-| 模糊字符 | ❌ 可能误识别 | ✅ 理解上下文 | ✅ 互相校验 |
-| 非标准格式 | ❌ 正则失效 | ✅ 智能解析 | ✅ 双重保障 |
-| 金额数字 | ✅ 精确识别 | ⚠️ 可能幻觉 | ✅ 数值比对 |
-| 处理成本 | 💰 低 | 💰💰 高 | 💰 按需调用 |
+| 场景 | 结果 |
+|-----|------|
+| 清晰的标准发票 | 本地 OCR 直接完成，零 API 成本 |
+| OCR 模糊/字段缺失 | 自动触发 LLM 兜底（视觉或文本模型均可） |
+| OCR 与 LLM 都有结果 | 双源逐字段比对，冲突自动标记人工复核 |
+| 金额数字 | OCR 精确识别，LLM 兜底时数值比对校验 |
 
 ---
 
@@ -253,7 +261,7 @@ docker-compose up -d
 | 📤 批量上传 | 支持 PDF、JPG、PNG，单次多文件上传 |
 | 🔍 OCR识别 | PaddleOCR 中文优化，300DPI 高清识别 |
 | 🤖 LLM解析 | Vision 模型直接理解发票图像 |
-| ⚖️ 智能比对 | 自动对比OCR和LLM结果，标记差异 |
+| ⚖️ 智能比对 | LLM 兜底触发时自动对比OCR和LLM结果，标记差异 |
 | ✏️ 人工复核 | 冲突字段可视化，一键选择正确值 |
 | 📊 统计报表 | 金额汇总、税额统计、状态分布 |
 
