@@ -12,6 +12,8 @@ import styles from './UsersPage.module.css';
 
 interface UsersPageProps {
   currentUser: User;
+  /** Render without page-level padding/heading (for embedding in Settings) */
+  embedded?: boolean;
 }
 
 interface UserFormValues {
@@ -24,7 +26,7 @@ interface ResetPasswordValues {
   password: string;
 }
 
-export default function UsersPage({ currentUser }: UsersPageProps) {
+export default function UsersPage({ currentUser, embedded = false }: UsersPageProps) {
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
@@ -196,14 +198,30 @@ export default function UsersPage({ currentUser }: UsersPageProps) {
   ];
 
   return (
-    <div className={styles.pageContainer}>
-      <div className={styles.contentWrapper}>
-        <div className={styles.pageHeader}>
-          <div>
-            <h1 className={styles.pageTitle}>用户管理</h1>
-            <p className={styles.pageSubtitle}>管理系统账号与权限</p>
+    <div className={embedded ? styles.embeddedContainer : styles.pageContainer}>
+      <div className={embedded ? styles.embeddedWrapper : styles.contentWrapper}>
+        {!embedded && (
+          <div className={styles.pageHeader}>
+            <div>
+              <h1 className={styles.pageTitle}>用户管理</h1>
+              <p className={styles.pageSubtitle}>管理系统账号与权限</p>
+            </div>
+            <Space>
+              <Button icon={<ReloadOutlined />} onClick={fetchUsers}>
+                刷新
+              </Button>
+              <Button
+                type="primary"
+                icon={<UserAddOutlined />}
+                onClick={() => setCreateOpen(true)}
+              >
+                新增用户
+              </Button>
+            </Space>
           </div>
-          <Space>
+        )}
+        {embedded && (
+          <Space style={{ marginBottom: 16 }}>
             <Button icon={<ReloadOutlined />} onClick={fetchUsers}>
               刷新
             </Button>
@@ -215,7 +233,7 @@ export default function UsersPage({ currentUser }: UsersPageProps) {
               新增用户
             </Button>
           </Space>
-        </div>
+        )}
 
         <Table<User>
           rowKey="id"

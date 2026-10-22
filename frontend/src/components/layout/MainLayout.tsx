@@ -1,6 +1,6 @@
 import { ReactNode } from 'react';
-import { Alert, Button } from 'antd';
-import { RocketOutlined } from '@ant-design/icons';
+import { Alert } from 'antd';
+import { Link } from 'react-router-dom';
 import Sidebar from './Sidebar';
 import styles from './MainLayout.module.css';
 import type { User } from '../../types/user';
@@ -11,7 +11,6 @@ interface MainLayoutProps {
   onLogout: () => void;
   llmConfigured: boolean | null;
   showLlmPromo: boolean;
-  onOpenLLMConfig: () => void;
   onCloseLLMPromo: () => void;
 }
 
@@ -21,21 +20,15 @@ export default function MainLayout({
   onLogout,
   llmConfigured,
   showLlmPromo,
-  onOpenLLMConfig,
   onCloseLLMPromo,
 }: MainLayoutProps) {
   return (
     <div className={styles.layoutContainer}>
-      <Sidebar
-        user={user}
-        onLogout={onLogout}
-        llmConfigured={llmConfigured}
-        onOpenLLMConfig={onOpenLLMConfig}
-      />
+      <Sidebar user={user} onLogout={onLogout} llmConfigured={llmConfigured} />
 
       <main className={styles.mainContent}>
         <div className={styles.contentWrapper}>
-          {/* LLM Configuration Promo Banner */}
+          {/* LLM Configuration Promo Banner (admins only) */}
           {showLlmPromo && !llmConfigured && (
             <Alert
               className={styles.llmPromoAlert}
@@ -43,14 +36,9 @@ export default function MainLayout({
               description={
                 <span>
                   当前使用免费OCR预处理服务。配置LLM服务后可获得更精准的发票信息提取和智能比对功能。
-                  <Button
-                    type="link"
-                    icon={<RocketOutlined />}
-                    onClick={onOpenLLMConfig}
-                    style={{ padding: '0 4px' }}
-                  >
-                    立即配置
-                  </Button>
+                  <Link to="/settings" style={{ padding: '0 4px' }}>
+                    前往设置
+                  </Link>
                 </span>
               }
               type="info"

@@ -9,7 +9,8 @@ from sqlalchemy import select, delete
 
 from app.models.invoice import Invoice, OcrResult, LlmResult, ParsingDiff, InvoiceStatus
 from app.services.ocr_service import get_ocr_service, get_field_extractor
-from app.services.llm_service import get_llm_service
+from app.services.llm_service import LLMService
+from app.services.provider_service import get_active_provider_row
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -66,18 +67,17 @@ def _run_ocr(file_data: bytes, file_type: str) -> Tuple[str, float, Dict[str, An
     return raw_text, confidence, ocr_fields
 
 
-def _run_llm_vision(file_data: bytes, file_type: str) -> Dict[str, Any]:
+def _run_llm_vision(llm_service: LLMService, file_data: bytes, file_type: str) -> Dict[str, Any]:
     """Run LLM vision parsing in a separate thread.
 
     Args:
+        llm_service: LLM service bound to the active provider
         file_data: Raw file bytes
         file_type: File type (pdf, jpg, png, etc.)
 
     Returns:
         Dictionary of extracted fields
     """
-    llm_service = get_llm_service()
-
     if not llm_service.is_available or not llm_service.supports_vision():
         return {}
 
@@ -162,13 +162,16 @@ async def process_invoice(invoice_id: int, db: AsyncSession) -> bool:
         # Run OCR and LLM vision in PARALLEL using separate thread pools
         loop = asyncio.get_running_loop()
 
+        # Build the LLM service from the active DB provider before hitting threads
+        llm_service = LLMService(await get_active_provider_row(db))
+
         # Create tasks for parallel execution
         # OCR uses CPU-bound pool, LLM uses I/O-bound pool
         ocr_task = loop.run_in_executor(
             _ocr_executor, _run_ocr, invoice.file_data, invoice.file_type
         )
         llm_task = loop.run_in_executor(
-            _llm_executor, _run_llm_vision, invoice.file_data, invoice.file_type
+            _llm_executor, _run_llm_vision, llm_service, invoice.file_data, invoice.file_type
         )
 
         # Wait for both tasks to complete
@@ -443,8 +446,3 @@ def _update_invoice_from_fields(invoice: Invoice, fields: dict) -> None:
 
     if fields.get('tax_rate'):
         invoice.tax_rate = fields['tax_rate']
-
-
-def check_llm_available() -> bool:
-    """Check if LLM service is available."""
-    return get_llm_service().is_available

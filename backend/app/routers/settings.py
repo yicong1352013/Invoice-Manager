@@ -1,470 +1,316 @@
-"""Settings and configuration API endpoints."""
+"""Settings API: LLM provider management, app settings (OCR engine, MCP).
+
+All read endpoints require an authenticated user; write endpoints require an
+admin (or the legacy LLM_CONFIG_TOKEN as an alternative bearer credential).
+"""
 
 import logging
 import os
-from pathlib import Path
-from typing import Optional, List
-from pydantic import BaseModel
-from fastapi import APIRouter, Depends, HTTPException, Header
+from typing import List, Optional
 
-logger = logging.getLogger(__name__)
+from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-
-def _update_env_file(updates: dict[str, str]) -> None:
-    """Update .env file with new key-value pairs.
-
-    Preserves existing entries and comments, updates existing keys,
-    and appends new keys at the end.
-    """
-    env_path = Path(__file__).parent.parent.parent / ".env"
-
-    # Read existing content
-    existing_lines = []
-    existing_keys = set()
-    if env_path.exists():
-        with open(env_path, "r") as f:
-            for line in f:
-                stripped = line.strip()
-                # Track existing keys (ignore comments and empty lines)
-                if stripped and not stripped.startswith("#") and "=" in stripped:
-                    key = stripped.split("=", 1)[0].strip()
-                    existing_keys.add(key)
-                existing_lines.append(line)
-
-    # Update existing lines or mark keys as handled
-    updated_keys = set()
-    new_lines = []
-    for line in existing_lines:
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#") and "=" in stripped:
-            key = stripped.split("=", 1)[0].strip()
-            if key in updates:
-                # Replace this line with updated value
-                new_lines.append(f"{key}={updates[key]}\n")
-                updated_keys.add(key)
-            else:
-                new_lines.append(line)
-        else:
-            new_lines.append(line)
-
-    # Append new keys that weren't in the file
-    for key, value in updates.items():
-        if key not in updated_keys:
-            new_lines.append(f"{key}={value}\n")
-
-    # Write back
-    with open(env_path, "w") as f:
-        f.writelines(new_lines)
-
-    logger.info(f"Updated .env file with keys: {list(updates.keys())}")
-
-
-def _require_llm_config_token(
-    required_token: str,
-    header_token: Optional[str],
-    authorization: Optional[str],
-) -> None:
-    """Verify LLM config token when configured via env."""
-    if not required_token:
-        return
-
-    candidate = header_token
-    if not candidate and authorization:
-        auth_value = authorization.strip()
-        if auth_value.lower().startswith("bearer "):
-            candidate = auth_value[7:].strip()
-        else:
-            candidate = auth_value
-
-    if not candidate or candidate != required_token:
-        raise HTTPException(status_code=401, detail="未授权")
-
-from app.config import get_settings, clear_settings_cache
 from app.auth import get_current_user, require_admin
-from app.models.user import User
-from app.services.llm_service import get_llm_service, reset_llm_service, PROVIDERS
+from app.database import get_db
+from app.models.provider import LlmProvider, ProviderProtocol
+from app.models.user import User, UserRole
+from app.services.provider_service import (
+    get_active_provider_row,
+    get_setting,
+    list_providers,
+    mask_secret,
+    set_setting,
+)
+from app.models.provider import (
+    SETTING_BAIDU_OCR_API_KEY,
+    SETTING_BAIDU_OCR_SECRET_KEY,
+    SETTING_MCP_ENABLED,
+    SETTING_MCP_TOKEN,
+    SETTING_OCR_ENGINE,
+)
 from app.services.model_registry import get_models_with_fallback
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-class LLMProviderInfo(BaseModel):
-    """Information about an LLM provider."""
+_bearer_scheme = HTTPBearer(auto_error=False)
+
+
+async def require_settings_write(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    """Admin gate for settings writes. LLM_CONFIG_TOKEN (if configured) is
+    accepted as an alternative bearer credential for API automation."""
+    raw_token = credentials.credentials if credentials else None
+    config_token = os.environ.get("LLM_CONFIG_TOKEN", "")
+    if config_token and raw_token == config_token:
+        return User(username="llm-config-token", role=UserRole.ADMIN, enabled=True)
+
+    user = await get_current_user(credentials=credentials, token=None, db=db)
+    if user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    return user
+
+
+# --- schemas -----------------------------------------------------------------
+
+
+class ProviderOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
     name: str
     display_name: str
-    is_configured: bool
+    protocol: ProviderProtocol
+    base_url: Optional[str] = None
     model: Optional[str] = None
+    vision: bool
+    is_preset: bool
+    enabled: bool
+    api_key_masked: Optional[str] = None
+    has_api_key: bool = False
+
+
+class ProviderCreateRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=50, pattern=r"^[a-z0-9][a-z0-9_-]*$")
+    display_name: str = Field(min_length=1, max_length=100)
+    protocol: ProviderProtocol
+    base_url: Optional[str] = Field(default=None, max_length=500)
+    api_key: Optional[str] = Field(default=None, max_length=500)
+    model: Optional[str] = Field(default=None, max_length=200)
+    vision: bool = False
+
+
+class ProviderUpdateRequest(BaseModel):
+    display_name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None  # write-only: empty/None = keep current
+    model: Optional[str] = None
+    vision: Optional[bool] = None
+    enabled: Optional[bool] = None
+
+
+class ProviderTestRequest(BaseModel):
+    protocol: ProviderProtocol
+    api_key: str = Field(min_length=1)
+    model: str
     base_url: Optional[str] = None
 
 
-class LLMStatusResponse(BaseModel):
-    """Response for LLM status check."""
-    is_configured: bool
-    active_provider: Optional[str] = None
-    active_provider_display: Optional[str] = None
-    configured_providers: List[str] = []
-    available_providers: List[LLMProviderInfo] = []
-
-
-class LLMConfigRequest(BaseModel):
-    """Request to configure an LLM provider."""
-    provider: str
-    api_key: str
-    model: Optional[str] = None
-    base_url: Optional[str] = None
-
-
-class LLMConfigResponse(BaseModel):
-    """Response after configuring LLM."""
-    success: bool
-    message: str
-    provider: Optional[str] = None
-
-
-# Display names for providers
-PROVIDER_DISPLAY_NAMES = {
-    "openai": "OpenAI (GPT)",
-    "anthropic": "Anthropic (Claude)",
-    "google": "Google (Gemini)",
-    "qwen": "阿里云 (通义千问)",
-    "deepseek": "DeepSeek",
-    "zhipu": "智谱 (GLM)",
-}
-
-# Default models for providers
-DEFAULT_MODELS = {
-    "openai": "gpt-4o-mini",
-    "anthropic": "claude-3-haiku-20240307",
-    "google": "gemini-1.5-flash",
-    "qwen": "qwen-turbo",
-    "deepseek": "deepseek-chat",
-    "zhipu": "glm-4-flash",
-}
-
-
-@router.get("/llm/status", response_model=LLMStatusResponse)
-async def get_llm_status(
-    _current_user: User = Depends(get_current_user),
-):
-    """Get LLM configuration status."""
-    settings = get_settings()
-    llm_service = get_llm_service()
-
-    active_provider = settings.get_active_llm_provider()
-    configured_providers = llm_service.get_configured_providers()
-
-    # Build available providers list
-    available_providers = []
-    for name in PROVIDERS.keys():
-        provider_info = LLMProviderInfo(
-            name=name,
-            display_name=PROVIDER_DISPLAY_NAMES.get(name, name),
-            is_configured=name in configured_providers,
-            model=_get_provider_model(name) if name in configured_providers else DEFAULT_MODELS.get(name),
-            base_url=_get_provider_base_url(name) if name in configured_providers else None,
-        )
-        available_providers.append(provider_info)
-
-    return LLMStatusResponse(
-        is_configured=settings.is_llm_configured(),
-        active_provider=active_provider,
-        active_provider_display=PROVIDER_DISPLAY_NAMES.get(active_provider, active_provider) if active_provider else None,
-        configured_providers=configured_providers,
-        available_providers=available_providers,
-    )
-
-
-@router.post("/llm/configure", response_model=LLMConfigResponse)
-async def configure_llm(
-    request: LLMConfigRequest,
-    x_llm_config_token: Optional[str] = Header(default=None, alias="X-LLM-Config-Token"),
-    authorization: Optional[str] = Header(default=None),
-    _admin: User = Depends(require_admin),
-):
-    """Configure an LLM provider and persist to .env file."""
-    provider = request.provider.lower()
-
-    _require_llm_config_token(
-        os.environ.get("LLM_CONFIG_TOKEN", ""),
-        x_llm_config_token,
-        authorization,
-    )
-
-    if provider not in PROVIDERS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"不支持的LLM提供商: {provider}。支持的提供商: {', '.join(PROVIDERS.keys())}"
-        )
-
-    if not request.api_key:
-        raise HTTPException(status_code=400, detail="API密钥不能为空")
-
-    try:
-        # Build env updates for both os.environ and .env file
-        env_updates: dict[str, str] = {"LLM_PROVIDER": provider}
-
-        # Provider-specific configuration
-        provider_config = {
-            "openai": ("OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL"),
-            "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL"),
-            "google": ("GOOGLE_API_KEY", "GOOGLE_MODEL", "GOOGLE_BASE_URL"),
-            "qwen": ("QWEN_API_KEY", "QWEN_MODEL", "QWEN_BASE_URL"),
-            "deepseek": ("DEEPSEEK_API_KEY", "DEEPSEEK_MODEL", "DEEPSEEK_BASE_URL"),
-            "zhipu": ("ZHIPU_API_KEY", "ZHIPU_MODEL", "ZHIPU_BASE_URL"),
-        }
-
-        key_name, model_name, base_url_name = provider_config[provider]
-        env_updates[key_name] = request.api_key
-        if request.model:
-            env_updates[model_name] = request.model
-        if request.base_url and base_url_name:
-            env_updates[base_url_name] = request.base_url
-
-        # Set environment variables for current process
-        for key, value in env_updates.items():
-            os.environ[key] = value
-
-        # Persist to .env file for restart persistence
-        _update_env_file(env_updates)
-
-        # Clear caches to reload settings
-        clear_settings_cache()
-        reset_llm_service()
-
-        # Verify configuration
-        new_settings = get_settings()
-        if not new_settings.is_llm_configured():
-            raise HTTPException(status_code=500, detail="配置失败，请检查API密钥是否正确")
-
-        return LLMConfigResponse(
-            success=True,
-            message=f"已成功配置 {PROVIDER_DISPLAY_NAMES.get(provider, provider)}",
-            provider=provider,
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"LLM configuration failed: {e}")
-        raise HTTPException(status_code=500, detail="配置失败，请检查配置参数是否正确") from e
-
-
-@router.post("/llm/test")
-async def test_llm_connection(
-    _admin: User = Depends(require_admin),
-):
-    """Test the current LLM configuration with a simple request."""
-    llm_service = get_llm_service()
-
-    if not llm_service.is_available:
-        raise HTTPException(status_code=400, detail="未配置LLM提供商")
-
-    try:
-        provider = llm_service.active_provider
-        if not provider:
-            raise HTTPException(status_code=500, detail="无法获取LLM提供商实例")
-
-        # Simple test prompt
-        response = provider.chat_completion(
-            "You are a helpful assistant.",
-            "Reply with exactly: OK"
-        )
-
-        return {
-            "success": True,
-            "provider": provider.get_provider_name(),
-            "provider_display": PROVIDER_DISPLAY_NAMES.get(provider.get_provider_name(), provider.get_provider_name()),
-            "message": "LLM连接测试成功",
-            "response": response[:100],  # Limit response length
-        }
-
-    except Exception as e:
-        logger.error(f"LLM connection test failed: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="LLM连接测试失败，请检查API密钥和网络连接"
-        ) from e
-
-
-def _get_provider_model(provider_name: str) -> Optional[str]:
-    """Get the configured model for a provider."""
-    settings = get_settings()
-    model_map = {
-        "openai": settings.openai_model,
-        "anthropic": settings.anthropic_model,
-        "google": settings.google_model,
-        "qwen": settings.qwen_model,
-        "deepseek": settings.deepseek_model,
-        "zhipu": settings.zhipu_model,
-    }
-    return model_map.get(provider_name)
-
-
-def _get_provider_base_url(provider_name: str) -> Optional[str]:
-    """Get the configured base URL for a provider."""
-    settings = get_settings()
-    url_map = {
-        "openai": settings.openai_base_url,
-        "anthropic": settings.anthropic_base_url,
-        "google": settings.google_base_url,
-        "qwen": settings.qwen_base_url,
-        "deepseek": settings.deepseek_base_url,
-        "zhipu": settings.zhipu_base_url,
-    }
-    return url_map.get(provider_name) or None
-
-
-class ConfigTestRequest(BaseModel):
-    """Request to test LLM config before saving."""
-    provider: str
-    api_key: str
-    model: Optional[str] = None
-    base_url: Optional[str] = None
-
-
-class ConfigTestResponse(BaseModel):
-    """Response for config test."""
+class ProviderTestResponse(BaseModel):
     success: bool
     message: str
     response_time_ms: Optional[int] = None
 
 
-# Default base URLs for providers that require them
-_DEFAULT_BASE_URLS = {
-    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    "deepseek": "https://api.deepseek.com",
-}
+class LLMStatusResponse(BaseModel):
+    is_configured: bool
+    active_provider: Optional[ProviderOut] = None
 
 
-def _test_openai_compatible(client, model: str) -> str:
-    """Test an OpenAI-compatible client, with fallback to Responses API."""
-    try:
-        # Try Chat Completions API first (standard OpenAI)
-        stream = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": "Reply with exactly: OK"},
-            ],
-            temperature=0.1,
-            max_tokens=10,
-            stream=True,
-        )
-        parts = []
-        for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta.content:
-                parts.append(chunk.choices[0].delta.content)
-        return "".join(parts).strip()
-    except Exception as e:
-        err_msg = str(e)
-        # If proxy doesn't support Chat Completions, try Responses API
-        if "Unsupported parameter" not in err_msg and "messages" not in err_msg.lower():
-            raise
-        # Fall back to Responses API (used by Codex-compatible proxies)
-        if not hasattr(client, 'responses'):
-            raise RuntimeError(
-                "此代理使用 Responses API，但当前 openai SDK 版本不支持。"
-                "请升级: pip install -U openai"
-            ) from e
-        stream = client.responses.create(
-            model=model,
-            input=[{"role": "user", "content": "Reply with exactly: OK"}],
-            stream=True,
-        )
-        parts = []
-        for event in stream:
-            if getattr(event, 'type', '') == 'response.output_text.delta':
-                parts.append(event.delta)
-        return "".join(parts).strip()
+class AppSettingsOut(BaseModel):
+    ocr_engine: str
+    baidu_ocr_api_key_masked: Optional[str] = None
+    has_baidu_ocr_api_key: bool = False
+    baidu_ocr_secret_key_masked: Optional[str] = None
+    has_baidu_ocr_secret_key: bool = False
+    mcp_enabled: bool
+    mcp_token_masked: Optional[str] = None
+    has_mcp_token: bool = False
 
 
-@router.post("/llm/test-config", response_model=ConfigTestResponse)
-async def test_llm_config(
-    request: ConfigTestRequest,
-    _admin: User = Depends(require_admin),
+class AppSettingsUpdateRequest(BaseModel):
+    ocr_engine: Optional[str] = None  # 'local' | 'baidu'
+    baidu_ocr_api_key: Optional[str] = None  # empty/None = keep
+    baidu_ocr_secret_key: Optional[str] = None
+    mcp_enabled: Optional[bool] = None
+    mcp_token: Optional[str] = None
+
+
+def _provider_out(row: LlmProvider) -> ProviderOut:
+    out = ProviderOut.model_validate(row)
+    out.api_key_masked = mask_secret(row.api_key)
+    out.has_api_key = bool(row.api_key)
+    return out
+
+
+# --- LLM status (any authenticated user) -------------------------------------
+
+
+@router.get("/llm/status", response_model=LLMStatusResponse)
+async def get_llm_status(
+    _current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    """Test LLM configuration before saving using the actual provider client library."""
+    """Get LLM configuration status (drives the frontend promo banner)."""
+    active = await get_active_provider_row(db)
+    configured = active is not None and bool(active.api_key) and bool(active.model)
+    return LLMStatusResponse(
+        is_configured=configured,
+        active_provider=_provider_out(active) if active else None,
+    )
+
+
+# --- Provider CRUD (admin) ---------------------------------------------------
+
+
+@router.get("/providers", response_model=List[ProviderOut])
+async def list_llm_providers(
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """List all providers (preset and custom) with masked keys."""
+    active = await get_active_provider_row(db)
+    rows = await list_providers(db)
+    return [_provider_out(r) for r in rows]
+
+
+@router.post("/providers", response_model=ProviderOut)
+async def create_provider(
+    body: ProviderCreateRequest,
+    _admin: User = Depends(require_settings_write),
+    db: AsyncSession = Depends(get_db),
+):
+    """Add a custom provider (OpenAI/Anthropic compatible endpoint)."""
+    existing = await db.execute(select(LlmProvider).where(LlmProvider.name == body.name))
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail=f"供应商标识已存在: {body.name}")
+
+    row = LlmProvider(
+        name=body.name,
+        display_name=body.display_name,
+        protocol=body.protocol,
+        base_url=(body.base_url or "").strip() or None,
+        api_key=(body.api_key or "").strip() or None,
+        model=(body.model or "").strip() or None,
+        vision=body.vision,
+        is_preset=False,
+        enabled=True,
+        sort_order=100,
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return _provider_out(row)
+
+
+@router.patch("/providers/{provider_id}", response_model=ProviderOut)
+async def update_provider(
+    provider_id: int,
+    body: ProviderUpdateRequest,
+    _admin: User = Depends(require_settings_write),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update a provider. Secret fields are write-only (empty = keep)."""
+    row = await db.get(LlmProvider, provider_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="供应商不存在")
+
+    if body.display_name is not None:
+        row.display_name = body.display_name
+    if body.base_url is not None:
+        row.base_url = body.base_url.strip() or None
+    if body.api_key:  # empty/None keeps the current key
+        row.api_key = body.api_key.strip()
+    if body.model is not None:
+        row.model = body.model.strip() or None
+    if body.vision is not None:
+        row.vision = body.vision
+    if body.enabled is not None:
+        row.enabled = body.enabled
+
+    await db.commit()
+    await db.refresh(row)
+    return _provider_out(row)
+
+
+@router.delete("/providers/{provider_id}")
+async def delete_provider(
+    provider_id: int,
+    _admin: User = Depends(require_settings_write),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a custom provider (presets cannot be deleted, only cleared)."""
+    row = await db.get(LlmProvider, provider_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="供应商不存在")
+    if row.is_preset:
+        raise HTTPException(status_code=400, detail="预置供应商不能删除，只能清空密钥或停用")
+
+    active_id = await get_setting(db, "active_provider_id")
+    await db.delete(row)
+    if active_id == str(provider_id):
+        await set_setting(db, "active_provider_id", None)
+    await db.commit()
+    return {"message": f"已删除供应商 {row.name}"}
+
+
+@router.post("/providers/{provider_id}/activate", response_model=ProviderOut)
+async def activate_provider(
+    provider_id: int,
+    _admin: User = Depends(require_settings_write),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set the active provider used by the recognition pipeline."""
+    row = await db.get(LlmProvider, provider_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="供应商不存在")
+    if not row.enabled:
+        raise HTTPException(status_code=400, detail="供应商已停用，请先启用")
+    if not row.api_key or not row.model:
+        raise HTTPException(status_code=400, detail="请先填写该供应商的 API Key 和模型")
+
+    await set_setting(db, "active_provider_id", str(provider_id))
+    await db.commit()
+    return _provider_out(row)
+
+
+@router.post("/providers/test", response_model=ProviderTestResponse)
+async def test_provider_config(
+    body: ProviderTestRequest,
+    _admin: User = Depends(require_settings_write),
+):
+    """Test an (unsaved) provider configuration with the real client library."""
     import time
 
-    provider = request.provider.lower()
-    if provider not in PROVIDERS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"不支持的LLM提供商: {provider}。支持的提供商: {', '.join(PROVIDERS.keys())}"
-        )
+    from app.services.llm_service import (
+        AnthropicCompatibleClient,
+        GoogleClient,
+        OpenAICompatibleClient,
+    )
 
-    if not request.api_key:
-        raise HTTPException(status_code=400, detail="API密钥不能为空")
+    client_cls = {
+        ProviderProtocol.OPENAI_COMPATIBLE: OpenAICompatibleClient,
+        ProviderProtocol.ANTHROPIC_COMPATIBLE: AnthropicCompatibleClient,
+        ProviderProtocol.GOOGLE: GoogleClient,
+    }[body.protocol]
 
-    model = request.model or DEFAULT_MODELS.get(provider, "")
-    base_url = request.base_url.strip().rstrip("/") if request.base_url else None
+    base_url = body.base_url.strip().rstrip("/") if body.base_url else None
+    client = client_cls(
+        model=body.model.strip(),
+        api_key=body.api_key.strip(),
+        base_url=base_url,
+        declared_vision=True,
+    )
 
     start = time.monotonic()
     try:
-        if provider in ("openai", "qwen", "deepseek"):
-            from openai import OpenAI
-            kwargs = {"api_key": request.api_key}
-            effective_url = base_url or _DEFAULT_BASE_URLS.get(provider)
-            if effective_url:
-                kwargs["base_url"] = effective_url
-            # Override User-Agent for custom base URLs to avoid Cloudflare WAF
-            # blocking the default "OpenAI/Python" user agent
-            if base_url:
-                kwargs["default_headers"] = {"User-Agent": "python-httpx/0.27.0"}
-            client = OpenAI(**kwargs)
-            result_text = _test_openai_compatible(client, model)
-
-        elif provider == "anthropic":
-            import anthropic
-            kwargs = {"api_key": request.api_key}
-            if base_url:
-                kwargs["base_url"] = base_url
-            client = anthropic.Anthropic(**kwargs)
-            response = client.messages.create(
-                model=model,
-                max_tokens=10,
-                system="You are a helpful assistant.",
-                messages=[{"role": "user", "content": "Reply with exactly: OK"}],
-            )
-            result_text = response.content[0].text.strip()
-
-        elif provider == "google":
-            import google.generativeai as genai
-            configure_kwargs = {"api_key": request.api_key}
-            if base_url:
-                configure_kwargs["client_options"] = {"api_endpoint": base_url}
-            genai.configure(**configure_kwargs)
-            gmodel = genai.GenerativeModel(model)
-            response = gmodel.generate_content("Reply with exactly: OK")
-            result_text = response.text.strip()
-
-        elif provider == "zhipu":
-            from zhipuai import ZhipuAI
-            kwargs = {"api_key": request.api_key}
-            if base_url:
-                kwargs["base_url"] = base_url
-            client = ZhipuAI(**kwargs)
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": "Reply with exactly: OK"},
-                ],
-                temperature=0.1,
-                max_tokens=10,
-            )
-            result_text = response.choices[0].message.content.strip()
-
-        else:
-            raise HTTPException(status_code=400, detail=f"不支持的LLM提供商: {provider}")
-
+        result_text = client.chat_completion(
+            "You are a helpful assistant.",
+            "Reply with exactly: OK"
+        )
         elapsed_ms = int((time.monotonic() - start) * 1000)
-        return ConfigTestResponse(
+        return ProviderTestResponse(
             success=True,
             message=f"连接成功，响应: {result_text[:50]}",
             response_time_ms=elapsed_ms,
         )
-
     except Exception as e:
         elapsed_ms = int((time.monotonic() - start) * 1000)
         error_msg = str(e)
@@ -473,23 +319,47 @@ async def test_llm_config(
         elif "403" in error_msg or "Forbidden" in error_msg:
             msg = "API密钥权限不足或访问被拒绝"
         elif "404" in error_msg or "Not Found" in error_msg:
-            msg = "API地址无效，请检查URL是否正确（对于OpenAI兼容接口，base_url通常需要包含 /v1 路径）"
+            msg = "API地址无效，请检查URL是否正确（OpenAI兼容接口的 base_url 通常需要包含 /v1 路径）"
         elif "connect" in error_msg.lower() or "timeout" in error_msg.lower():
             msg = "无法连接到该地址，请检查URL和网络连接"
-        elif "<!DOCTYPE" in error_msg or "<html" in error_msg:
+        elif "<!DOCTYPE" in error_msg or "<html" in error_msg.lower():
             msg = "API地址返回了网页而非API响应，请检查URL是否正确"
         elif "model" in error_msg.lower() and ("not found" in error_msg.lower() or "does not exist" in error_msg.lower()):
-            msg = f"模型不存在，请检查模型名称是否正确"
+            msg = "模型不存在，请检查模型名称是否正确"
         else:
-            # Clean up error message - remove HTML and limit length
-            clean_msg = error_msg.split('\n')[0][:150]
-            msg = f"测试失败: {clean_msg}"
-        logger.error(f"Config test failed for {provider}: {e}")
-        return ConfigTestResponse(success=False, message=msg, response_time_ms=elapsed_ms)
+            msg = f"测试失败: {error_msg.split(chr(10))[0][:150]}"
+        logger.error(f"Provider config test failed ({body.protocol}): {e}")
+        return ProviderTestResponse(success=False, message=msg, response_time_ms=elapsed_ms)
+
+
+@router.post("/providers/{provider_id}/test", response_model=ProviderTestResponse)
+async def test_saved_provider(
+    provider_id: int,
+    _admin: User = Depends(require_settings_write),
+    db: AsyncSession = Depends(get_db),
+):
+    """Test a saved provider's stored configuration."""
+    row = await db.get(LlmProvider, provider_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="供应商不存在")
+    if not row.api_key or not row.model:
+        raise HTTPException(status_code=400, detail="请先填写该供应商的 API Key 和模型")
+
+    return await test_provider_config(
+        body=ProviderTestRequest(
+            protocol=row.protocol,
+            api_key=row.api_key,
+            model=row.model,
+            base_url=row.base_url,
+        ),
+        _admin=_admin,
+    )
+
+
+# --- Model catalog (any authenticated user) ----------------------------------
 
 
 class ModelInfo(BaseModel):
-    """Information about a model."""
     id: str
     name: str
     vision: bool
@@ -498,9 +368,8 @@ class ModelInfo(BaseModel):
 
 
 class ModelsResponse(BaseModel):
-    """Response for available models."""
     models: List[ModelInfo]
-    source: str  # "openrouter" or "fallback"
+    source: str  # "openrouter" or "fallback" or "none"
 
 
 @router.get("/models", response_model=ModelsResponse)
@@ -509,33 +378,55 @@ async def get_available_models(
     vision_only: bool = False,
     _current_user: User = Depends(get_current_user),
 ):
-    """Get available models, optionally filtered by provider or vision capability.
-
-    Args:
-        provider: Filter by provider name (openai, anthropic, google, qwen, deepseek, zhipu)
-        vision_only: If true, only return models that support image input
-
-    Returns:
-        List of available models with their capabilities
-    """
-    if provider:
-        if provider.lower() not in PROVIDERS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"不支持的LLM提供商: {provider}。支持的提供商: {', '.join(PROVIDERS.keys())}"
-            )
-        models = get_models_with_fallback(provider, vision_only)
-    else:
-        # Get models for all providers
-        all_models = []
-        for prov in PROVIDERS.keys():
-            all_models.extend(get_models_with_fallback(prov, vision_only))
-        models = all_models
-
-    # Determine source based on model ID format (OpenRouter uses "provider/model" format)
+    """Available model suggestions for a provider slug (catalog only —
+    custom providers accept any model name via free-text input)."""
+    if not provider:
+        return ModelsResponse(models=[], source="none")
+    models = get_models_with_fallback(provider.lower(), vision_only)
     source = "openrouter" if models and "/" in models[0].get("id", "") else "fallback"
+    return ModelsResponse(models=[ModelInfo(**m) for m in models], source=source)
 
-    return ModelsResponse(
-        models=[ModelInfo(**m) for m in models],
-        source=source
+
+# --- App settings: OCR engine + MCP (admin) ----------------------------------
+
+
+@router.get("/app-settings", response_model=AppSettingsOut)
+async def get_app_settings(
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    baidu_key = await get_setting(db, SETTING_BAIDU_OCR_API_KEY)
+    baidu_secret = await get_setting(db, SETTING_BAIDU_OCR_SECRET_KEY)
+    mcp_token = await get_setting(db, SETTING_MCP_TOKEN)
+    return AppSettingsOut(
+        ocr_engine=await get_setting(db, SETTING_OCR_ENGINE, "local") or "local",
+        baidu_ocr_api_key_masked=mask_secret(baidu_key),
+        has_baidu_ocr_api_key=bool(baidu_key),
+        baidu_ocr_secret_key_masked=mask_secret(baidu_secret),
+        has_baidu_ocr_secret_key=bool(baidu_secret),
+        mcp_enabled=(await get_setting(db, SETTING_MCP_ENABLED, "false")) == "true",
+        mcp_token_masked=mask_secret(mcp_token),
+        has_mcp_token=bool(mcp_token),
     )
+
+
+@router.put("/app-settings", response_model=AppSettingsOut)
+async def update_app_settings(
+    body: AppSettingsUpdateRequest,
+    _admin: User = Depends(require_settings_write),
+    db: AsyncSession = Depends(get_db),
+):
+    if body.ocr_engine is not None:
+        if body.ocr_engine not in ("local", "baidu"):
+            raise HTTPException(status_code=400, detail="ocr_engine 只支持 local 或 baidu")
+        await set_setting(db, SETTING_OCR_ENGINE, body.ocr_engine)
+    if body.baidu_ocr_api_key:
+        await set_setting(db, SETTING_BAIDU_OCR_API_KEY, body.baidu_ocr_api_key.strip())
+    if body.baidu_ocr_secret_key:
+        await set_setting(db, SETTING_BAIDU_OCR_SECRET_KEY, body.baidu_ocr_secret_key.strip())
+    if body.mcp_enabled is not None:
+        await set_setting(db, SETTING_MCP_ENABLED, "true" if body.mcp_enabled else "false")
+    if body.mcp_token:
+        await set_setting(db, SETTING_MCP_TOKEN, body.mcp_token.strip())
+    await db.commit()
+    return await get_app_settings(_admin=_admin, db=db)

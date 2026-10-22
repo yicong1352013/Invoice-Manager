@@ -33,3 +33,13 @@
   color: var(--muted-foreground);
   margin: var(--spacing-xs) 0 0 0;
 }
+
+/* Embedded mode (inside the Settings page cards) */
+.embeddedContainer {
+  width: 100%;
+}
+
+.embeddedWrapper {
+  display: flex;
+  flex-direction: column;
+}

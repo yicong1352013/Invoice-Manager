@@ -131,3 +131,45 @@ INVOICE_VISION_PROMPT = f"""请分析这张中国发票图片，提取发票信�
 - 无法识别的字段返回null，不要猜测
 
 请直接返回JSON对象："""
+
+
+# Text-based extraction (fallback when the active model has no vision:
+# parses the OCR raw text instead of the image itself)
+INVOICE_TEXT_SYSTEM_PROMPT = INVOICE_VISION_SYSTEM_PROMPT
+
+INVOICE_TEXT_PROMPT = f"""以下是中国发票的OCR识别文本（行序可能打乱，含噪音），
+请从中提取发票信息。
+
+## OCR原文
+
+{{ocr_text}}
+
+## 输出格式要求（必须严格遵守）
+
+返回一个JSON对象，必须包含以下12个字段（不能多也不能少）：
+{_field_descriptions}
+
+字段类型规则：
+- 所有字段值必须是 string 或 null（数值也用字符串表示）
+- 日期格式必须是 YYYY-MM-DD
+- 金额字段仅包含数字和小数点
+- 税率字段格式如 \\"6%\\"、\\"13%\\" 或 \\"免税\\"
+- 不能返回空字符串，用 null 表示缺失
+
+## 字段提取规则
+
+1. invoice_number: 查找"发票号码"附近的数字
+2. invoice_code: 查找"发票代码"附近的数字（如无则返回null）
+3. issue_date: 查找"开票日期"，转换为YYYY-MM-DD格式
+4. buyer_name: "购买方"区域的"名称"后公司全称；销售方区域的"名称"是seller_name
+5. buyer_tax_id/seller_tax_id: 对应区域的"纳税人识别号"15-20位编码
+6. item_name: 商品行项目名称（可能有*分类*前缀）
+7. total_with_tax: "价税合计"（小写）金额，只返回数字
+8. amount: "合计"行不含税金额
+9. tax_amount: "税额"，免税发票返回"0"
+10. tax_rate: "税率"列的值
+
+OCR文本常见噪音：数字被拆分、标签与值分离、混入表格线字符。请基于上下文
+推断，不要猜测不存在的值，无法确定的字段返回null。
+
+请直接返回JSON对象："""

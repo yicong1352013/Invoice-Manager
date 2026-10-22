@@ -1,4 +1,8 @@
-"""LLM-based invoice parsing service with multi-provider support."""
+"""LLM-based invoice parsing service.
+
+Providers are configured in the database (llm_providers table) and built into
+protocol clients on demand: openai_compatible, anthropic_compatible, google.
+"""
 
 import base64
 import json
@@ -6,20 +10,18 @@ import logging
 import re
 import threading
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
 
-from app.config import get_settings
-
-# Thread lock for singleton initialization
-_llm_lock = threading.Lock()
+from app.models.provider import LlmProvider, ProviderProtocol
 from app.services.prompts import (
+    INVOICE_TEXT_PROMPT,
+    INVOICE_TEXT_SYSTEM_PROMPT,
     INVOICE_VISION_PROMPT,
     INVOICE_VISION_SYSTEM_PROMPT,
     REQUIRED_FIELDS,
 )
 
 logger = logging.getLogger(__name__)
-settings = get_settings()
 
 
 def _model_matches_vision_pattern(model_name: str, vision_patterns: list[str]) -> bool:
@@ -27,144 +29,108 @@ def _model_matches_vision_pattern(model_name: str, vision_patterns: list[str]) -
 
     Uses exact match or prefix match with separator to avoid false positives.
     For example, "gpt-4o" matches "gpt-4o" and "gpt-4o-mini" but not "gpt-4o-audio".
-
-    Args:
-        model_name: The configured model name
-        vision_patterns: List of known vision model patterns
-
-    Returns:
-        True if the model supports vision
     """
     for pattern in vision_patterns:
-        # Exact match
         if model_name == pattern:
             return True
-        # Prefix match: pattern must be followed by a separator (-) or end
         if model_name.startswith(pattern + "-") or model_name.startswith(pattern + "."):
             return True
     return False
 
 
 def _model_uses_new_token_param(model_name: str) -> bool:
-    """Check if a model uses max_completion_tokens instead of max_tokens.
-
-    Newer OpenAI models (o1, o3, gpt-5.x) require max_completion_tokens parameter.
-
-    Args:
-        model_name: The model name
-
-    Returns:
-        True if the model uses max_completion_tokens
-    """
+    """Newer OpenAI models (o1, o3, gpt-5.x) require max_completion_tokens."""
     new_format_prefixes = ["o1", "o3", "gpt-5"]
     return any(model_name.startswith(prefix) for prefix in new_format_prefixes)
 
 
 def _get_max_tokens_param(model_name: str, value: int) -> dict:
-    """Get the correct max tokens parameter for a model.
-
-    Args:
-        model_name: The model name
-        value: The max tokens value
-
-    Returns:
-        Dict with the appropriate parameter name and value
-    """
     if _model_uses_new_token_param(model_name):
         return {"max_completion_tokens": value}
     return {"max_tokens": value}
 
 
-class BaseLLMProvider(ABC):
-    """Base class for LLM providers."""
+class BaseLLMClient(ABC):
+    """A single configured LLM endpoint."""
 
-    @abstractmethod
-    def is_configured(self) -> bool:
-        """Check if provider is configured."""
-        pass
+    # Known vision model name patterns per protocol (fallback heuristic when
+    # the provider row does not declare vision capability)
+    VISION_PATTERNS: list[str] = []
 
-    @abstractmethod
-    def get_provider_name(self) -> str:
-        """Get provider name."""
-        pass
-
-    @abstractmethod
-    def chat_completion(self, system_prompt: str, user_prompt: str) -> str:
-        """Send chat completion request and return response content."""
-        pass
-
-    def supports_vision(self) -> bool:
-        """Check if provider supports vision/image input."""
-        return False
-
-    def vision_completion(self, system_prompt: str, user_prompt: str, image_data: bytes, mime_type: str = "image/png") -> str:
-        """Send vision completion request with image and return response content.
-
-        Args:
-            system_prompt: System prompt for the model
-            user_prompt: User prompt/instructions
-            image_data: Raw image bytes
-            mime_type: MIME type of the image (image/png, image/jpeg, etc.)
-
-        Returns:
-            Response content from the model
-        """
-        raise NotImplementedError("Vision not supported by this provider")
-
-
-class OpenAIProvider(BaseLLMProvider):
-    """OpenAI/OpenAI-compatible provider."""
-
-    # Models that support vision
-    # Note: gpt-5 and o-series models also support vision/multimodal input
-    VISION_MODELS = ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4-vision-preview", "gpt-5", "o1", "o3"]
-
-    def __init__(self):
-        self._client = None
+    def __init__(self, model: str, api_key: str, base_url: Optional[str], declared_vision: bool):
+        self.model = model
+        self.api_key = api_key
+        self.base_url = base_url
+        self.declared_vision = declared_vision
+        self._client: Any = None
         self._lock = threading.Lock()
 
-    @property
-    def client(self):
+    def _ensure_client(self):
         if self._client is None:
             with self._lock:
                 if self._client is None:
-                    from openai import OpenAI
-                    kwargs = {"api_key": settings.openai_api_key}
-                    if settings.openai_base_url:
-                        kwargs["base_url"] = settings.openai_base_url
-                        # Override User-Agent for custom base URLs to avoid
-                        # Cloudflare WAF blocking "OpenAI/Python" user agent
-                        kwargs["default_headers"] = {"User-Agent": "python-httpx/0.27.0"}
-                    self._client = OpenAI(**kwargs)
+                    self._client = self._create_client()
         return self._client
 
-    def is_configured(self) -> bool:
-        return bool(settings.openai_api_key)
+    @abstractmethod
+    def _create_client(self):
+        """Create the underlying SDK client (lazy, thread-safe)."""
 
-    def get_provider_name(self) -> str:
-        return "openai"
+    @abstractmethod
+    def get_protocol_name(self) -> str:
+        """Protocol slug for logging."""
+
+    @abstractmethod
+    def chat_completion(self, system_prompt: str, user_prompt: str) -> str:
+        """Send a text chat completion and return the response content."""
+
+    def vision_completion(self, system_prompt: str, user_prompt: str, image_data: bytes, mime_type: str = "image/png") -> str:
+        """Send a vision completion with an image; override where supported."""
+        raise NotImplementedError("Vision not supported by this provider")
 
     def supports_vision(self) -> bool:
-        return _model_matches_vision_pattern(settings.openai_model, self.VISION_MODELS)
+        """Declared capability wins; fall back to model-name heuristic."""
+        if self.declared_vision:
+            return True
+        return _model_matches_vision_pattern(self.model, self.VISION_PATTERNS)
+
+
+class OpenAICompatibleClient(BaseLLMClient):
+    """OpenAI Chat Completions protocol — also DeepSeek, GLM, Qwen, proxies."""
+
+    VISION_PATTERNS = ["gpt-4o", "gpt-4-turbo", "gpt-4-vision", "gpt-5", "o1", "o3",
+                       "qwen-vl", "qwen2-vl", "qwen2.5-vl", "glm-4v", "deepseek-vl",
+                       "deepseek-flash", "deepseek-v4"]
+
+    def _create_client(self):
+        from openai import OpenAI
+        kwargs = {"api_key": self.api_key}
+        if self.base_url:
+            kwargs["base_url"] = self.base_url
+            # Override User-Agent for custom base URLs to avoid
+            # Cloudflare WAF blocking "OpenAI/Python" user agent
+            kwargs["default_headers"] = {"User-Agent": "python-httpx/0.27.0"}
+        return OpenAI(**kwargs)
+
+    def get_protocol_name(self) -> str:
+        return "openai_compatible"
 
     def chat_completion(self, system_prompt: str, user_prompt: str) -> str:
-        model = settings.openai_model
-        response = self.client.chat.completions.create(
-            model=model,
+        response = self._ensure_client().chat.completions.create(
+            model=self.model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
             temperature=0.1,
-            **_get_max_tokens_param(model, 1000),
+            **_get_max_tokens_param(self.model, 2000),
         )
         return response.choices[0].message.content.strip()
 
     def vision_completion(self, system_prompt: str, user_prompt: str, image_data: bytes, mime_type: str = "image/png") -> str:
-        model = settings.openai_model
         base64_image = base64.b64encode(image_data).decode("utf-8")
-        response = self.client.chat.completions.create(
-            model=model,
+        response = self._ensure_client().chat.completions.create(
+            model=self.model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {
@@ -179,58 +145,40 @@ class OpenAIProvider(BaseLLMProvider):
                 }
             ],
             temperature=0.1,
-            **_get_max_tokens_param(model, 1500),
+            **_get_max_tokens_param(self.model, 2000),
         )
         return response.choices[0].message.content.strip()
 
 
-class AnthropicProvider(BaseLLMProvider):
-    """Anthropic Claude provider."""
+class AnthropicCompatibleClient(BaseLLMClient):
+    """Anthropic Messages API."""
 
-    # All Claude 3 models support vision
-    VISION_MODELS = ["claude-3", "claude-3.5"]
+    VISION_PATTERNS = ["claude-3", "claude-4", "claude-sonnet", "claude-opus", "claude-haiku"]
 
-    def __init__(self):
-        self._client = None
-        self._lock = threading.Lock()
+    def _create_client(self):
+        import anthropic
+        kwargs = {"api_key": self.api_key}
+        if self.base_url:
+            kwargs["base_url"] = self.base_url
+        return anthropic.Anthropic(**kwargs)
 
-    @property
-    def client(self):
-        if self._client is None:
-            with self._lock:
-                if self._client is None:
-                    import anthropic
-                    kwargs = {"api_key": settings.anthropic_api_key}
-                    if settings.anthropic_base_url:
-                        kwargs["base_url"] = settings.anthropic_base_url
-                    self._client = anthropic.Anthropic(**kwargs)
-        return self._client
-
-    def is_configured(self) -> bool:
-        return bool(settings.anthropic_api_key)
-
-    def get_provider_name(self) -> str:
-        return "anthropic"
-
-    def supports_vision(self) -> bool:
-        return _model_matches_vision_pattern(settings.anthropic_model, self.VISION_MODELS)
+    def get_protocol_name(self) -> str:
+        return "anthropic_compatible"
 
     def chat_completion(self, system_prompt: str, user_prompt: str) -> str:
-        response = self.client.messages.create(
-            model=settings.anthropic_model,
-            max_tokens=1000,
+        response = self._ensure_client().messages.create(
+            model=self.model,
+            max_tokens=2000,
             system=system_prompt,
-            messages=[
-                {"role": "user", "content": user_prompt}
-            ],
+            messages=[{"role": "user", "content": user_prompt}],
         )
         return response.content[0].text.strip()
 
     def vision_completion(self, system_prompt: str, user_prompt: str, image_data: bytes, mime_type: str = "image/png") -> str:
         base64_image = base64.b64encode(image_data).decode("utf-8")
-        response = self.client.messages.create(
-            model=settings.anthropic_model,
-            max_tokens=1500,
+        response = self._ensure_client().messages.create(
+            model=self.model,
+            max_tokens=2000,
             system=system_prompt,
             messages=[
                 {
@@ -252,339 +200,136 @@ class AnthropicProvider(BaseLLMProvider):
         return response.content[0].text.strip()
 
 
-class GoogleProvider(BaseLLMProvider):
-    """Google Gemini provider."""
+class GoogleClient(BaseLLMClient):
+    """Google Gemini native SDK."""
 
-    # Gemini models with vision support
-    VISION_MODELS = ["gemini-1.5", "gemini-2", "gemini-pro-vision"]
+    VISION_PATTERNS = ["gemini-1.5", "gemini-2", "gemini-pro-vision"]
 
-    def __init__(self):
-        self._model = None
+    def __init__(self, model: str, api_key: str, base_url: Optional[str], declared_vision: bool):
+        super().__init__(model, api_key, base_url, declared_vision)
         self._genai = None
-        self._lock = threading.Lock()
+        self._genai_lock = threading.Lock()
 
-    @property
-    def genai(self):
+    def _ensure_genai(self):
         if self._genai is None:
-            with self._lock:
+            with self._genai_lock:
                 if self._genai is None:
                     import google.generativeai as genai
-                    configure_kwargs = {"api_key": settings.google_api_key}
-                    if settings.google_base_url:
-                        configure_kwargs["client_options"] = {
-                            "api_endpoint": settings.google_base_url
-                        }
+                    configure_kwargs = {"api_key": self.api_key}
+                    if self.base_url:
+                        configure_kwargs["client_options"] = {"api_endpoint": self.base_url}
                     genai.configure(**configure_kwargs)
                     self._genai = genai
         return self._genai
 
-    @property
-    def model(self):
-        if self._model is None:
-            with self._lock:
-                if self._model is None:
-                    self._model = self.genai.GenerativeModel(settings.google_model)
-        return self._model
+    def _create_client(self):
+        return self._ensure_genai().GenerativeModel(self.model)
 
-    def is_configured(self) -> bool:
-        return bool(settings.google_api_key)
-
-    def get_provider_name(self) -> str:
+    def get_protocol_name(self) -> str:
         return "google"
 
-    def supports_vision(self) -> bool:
-        return _model_matches_vision_pattern(settings.google_model, self.VISION_MODELS)
-
     def chat_completion(self, system_prompt: str, user_prompt: str) -> str:
-        # Gemini combines system and user prompts
         full_prompt = f"{system_prompt}\n\n{user_prompt}"
-        response = self.model.generate_content(full_prompt)
+        response = self._ensure_client().generate_content(full_prompt)
         return response.text.strip()
 
     def vision_completion(self, system_prompt: str, user_prompt: str, image_data: bytes, mime_type: str = "image/png") -> str:
         from PIL import Image
         from io import BytesIO
 
-        # Convert bytes to PIL Image for Gemini
         image = Image.open(BytesIO(image_data))
-
-        # Combine system and user prompts
         full_prompt = f"{system_prompt}\n\n{user_prompt}"
-
-        response = self.model.generate_content([full_prompt, image])
+        response = self._ensure_client().generate_content([full_prompt, image])
         return response.text.strip()
 
 
-class QwenProvider(BaseLLMProvider):
-    """Alibaba Qwen provider (OpenAI-compatible)."""
+def build_client(row: Optional[LlmProvider]) -> Optional[BaseLLMClient]:
+    """Build a protocol client from a provider row, or None if unusable."""
+    if row is None:
+        return None
+    if not row.api_key or not row.model:
+        return None
 
-    # Qwen-VL models support vision
-    VISION_MODELS = ["qwen-vl", "qwen2-vl"]
-
-    def __init__(self):
-        self._client = None
-        self._lock = threading.Lock()
-
-    @property
-    def client(self):
-        if self._client is None:
-            with self._lock:
-                if self._client is None:
-                    from openai import OpenAI
-                    self._client = OpenAI(
-                        api_key=settings.qwen_api_key,
-                        base_url=settings.qwen_base_url,
-                    )
-        return self._client
-
-    def is_configured(self) -> bool:
-        return bool(settings.qwen_api_key)
-
-    def get_provider_name(self) -> str:
-        return "qwen"
-
-    def supports_vision(self) -> bool:
-        return _model_matches_vision_pattern(settings.qwen_model, self.VISION_MODELS)
-
-    def chat_completion(self, system_prompt: str, user_prompt: str) -> str:
-        response = self.client.chat.completions.create(
-            model=settings.qwen_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.1,
-            max_tokens=1000,
-        )
-        return response.choices[0].message.content.strip()
-
-    def vision_completion(self, system_prompt: str, user_prompt: str, image_data: bytes, mime_type: str = "image/png") -> str:
-        base64_image = base64.b64encode(image_data).decode("utf-8")
-        response = self.client.chat.completions.create(
-            model=settings.qwen_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": user_prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:{mime_type};base64,{base64_image}"}
-                        }
-                    ]
-                }
-            ],
-            temperature=0.1,
-            max_tokens=1500,
-        )
-        return response.choices[0].message.content.strip()
-
-
-class DeepSeekProvider(BaseLLMProvider):
-    """DeepSeek provider (OpenAI-compatible)."""
-
-    def __init__(self):
-        self._client = None
-        self._lock = threading.Lock()
-
-    @property
-    def client(self):
-        if self._client is None:
-            with self._lock:
-                if self._client is None:
-                    from openai import OpenAI
-                    self._client = OpenAI(
-                        api_key=settings.deepseek_api_key,
-                        base_url=settings.deepseek_base_url,
-                    )
-        return self._client
-
-    def is_configured(self) -> bool:
-        return bool(settings.deepseek_api_key)
-
-    def get_provider_name(self) -> str:
-        return "deepseek"
-
-    def chat_completion(self, system_prompt: str, user_prompt: str) -> str:
-        response = self.client.chat.completions.create(
-            model=settings.deepseek_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.1,
-            max_tokens=1000,
-        )
-        return response.choices[0].message.content.strip()
-
-
-class ZhipuProvider(BaseLLMProvider):
-    """Zhipu GLM provider."""
-
-    # GLM-4V models support vision
-    VISION_MODELS = ["glm-4v", "glm-4v-plus"]
-
-    def __init__(self):
-        self._client = None
-        self._lock = threading.Lock()
-
-    @property
-    def client(self):
-        if self._client is None:
-            with self._lock:
-                if self._client is None:
-                    from zhipuai import ZhipuAI
-                    kwargs = {"api_key": settings.zhipu_api_key}
-                    if settings.zhipu_base_url:
-                        kwargs["base_url"] = settings.zhipu_base_url
-                    self._client = ZhipuAI(**kwargs)
-        return self._client
-
-    def is_configured(self) -> bool:
-        return bool(settings.zhipu_api_key)
-
-    def get_provider_name(self) -> str:
-        return "zhipu"
-
-    def supports_vision(self) -> bool:
-        return _model_matches_vision_pattern(settings.zhipu_model, self.VISION_MODELS)
-
-    def chat_completion(self, system_prompt: str, user_prompt: str) -> str:
-        response = self.client.chat.completions.create(
-            model=settings.zhipu_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.1,
-            max_tokens=1000,
-        )
-        return response.choices[0].message.content.strip()
-
-    def vision_completion(self, system_prompt: str, user_prompt: str, image_data: bytes, mime_type: str = "image/png") -> str:
-        base64_image = base64.b64encode(image_data).decode("utf-8")
-        response = self.client.chat.completions.create(
-            model=settings.zhipu_model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": f"{system_prompt}\n\n{user_prompt}"},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:{mime_type};base64,{base64_image}"}
-                        }
-                    ]
-                }
-            ],
-            temperature=0.1,
-            max_tokens=1500,
-        )
-        return response.choices[0].message.content.strip()
-
-
-# Provider registry
-PROVIDERS: Dict[str, type] = {
-    "openai": OpenAIProvider,
-    "anthropic": AnthropicProvider,
-    "google": GoogleProvider,
-    "qwen": QwenProvider,
-    "deepseek": DeepSeekProvider,
-    "zhipu": ZhipuProvider,
-}
+    clients = {
+        ProviderProtocol.OPENAI_COMPATIBLE: OpenAICompatibleClient,
+        ProviderProtocol.ANTHROPIC_COMPATIBLE: AnthropicCompatibleClient,
+        ProviderProtocol.GOOGLE: GoogleClient,
+    }
+    client_class = clients.get(row.protocol)
+    if client_class is None:
+        logger.error(f"Unknown provider protocol: {row.protocol}")
+        return None
+    return client_class(
+        model=row.model,
+        api_key=row.api_key,
+        base_url=row.base_url or None,
+        declared_vision=bool(row.vision),
+    )
 
 
 class LLMService:
-    """Handles LLM-based invoice parsing with multi-provider support."""
+    """Invoice parsing facade bound to one provider row."""
 
-    def __init__(self):
-        self._providers: Dict[str, BaseLLMProvider] = {}
-        self._active_provider: Optional[BaseLLMProvider] = None
-
-    def _get_provider(self, provider_name: str) -> Optional[BaseLLMProvider]:
-        """Get or create a provider instance."""
-        if provider_name not in self._providers:
-            if provider_name in PROVIDERS:
-                self._providers[provider_name] = PROVIDERS[provider_name]()
-        return self._providers.get(provider_name)
-
-    @property
-    def active_provider(self) -> Optional[BaseLLMProvider]:
-        """Get the active LLM provider.
-
-        Always fetch fresh settings to ensure config changes are reflected.
-        """
-        if self._active_provider is None:
-            provider_name = get_settings().get_active_llm_provider()
-            if provider_name:
-                self._active_provider = self._get_provider(provider_name)
-        return self._active_provider
+    def __init__(self, provider_row: Optional[LlmProvider] = None):
+        self._row = provider_row
+        self._client: Optional[BaseLLMClient] = None
+        if provider_row is not None:
+            self._client = build_client(provider_row)
 
     @property
     def is_available(self) -> bool:
-        """Check if any LLM provider is available.
+        return self._client is not None
 
-        Always fetch fresh settings to ensure config changes are reflected.
-        """
-        return get_settings().is_llm_configured()
-
-    def get_configured_providers(self) -> list[str]:
-        """Get list of configured provider names."""
-        configured = []
-        for name, provider_class in PROVIDERS.items():
-            provider = self._get_provider(name)
-            if provider and provider.is_configured():
-                configured.append(name)
-        return configured
-
-    def get_active_provider_name(self) -> Optional[str]:
-        """Get the name of the active provider."""
-        return get_settings().get_active_llm_provider()
+    @property
+    def provider_name(self) -> Optional[str]:
+        return self._row.name if self._row else None
 
     def supports_vision(self) -> bool:
-        """Check if the active provider supports vision/image input."""
-        provider = self.active_provider
-        return provider.supports_vision() if provider else False
+        return self._client.supports_vision() if self._client else False
 
     def parse_invoice_from_image(self, image_data: bytes, mime_type: str = "image/png") -> Dict[str, Any]:
-        """Parse invoice directly from image using vision capabilities.
-
-        Args:
-            image_data: Raw image bytes
-            mime_type: MIME type of the image
-
-        Returns:
-            Dictionary of extracted fields
-        """
+        """Parse invoice directly from image using vision capabilities."""
         if not self.is_available:
             logger.warning("No LLM provider configured, skipping vision parsing")
             return {}
 
-        provider = self.active_provider
-        if not provider:
-            logger.warning("Failed to get active LLM provider")
-            return {}
-
-        if not provider.supports_vision():
-            logger.warning(f"Provider {provider.get_provider_name()} does not support vision")
+        if not self._client.supports_vision():
+            logger.warning(f"Provider {self._client.get_protocol_name()} model does not support vision")
             return {}
 
         try:
-            content = provider.vision_completion(
+            content = self._client.vision_completion(
                 INVOICE_VISION_SYSTEM_PROMPT,
                 INVOICE_VISION_PROMPT,
                 image_data,
                 mime_type
             )
-
-            return self._parse_json_response(content, provider.get_provider_name())
-
+            return self._parse_json_response(content, self._client.get_protocol_name())
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse LLM vision response as JSON: {e}")
             return {}
         except Exception as e:
-            logger.error(f"LLM vision parsing failed ({provider.get_provider_name()}): {e}")
+            logger.error(f"LLM vision parsing failed ({self._client.get_protocol_name()}): {e}")
+            return {}
+
+    def parse_invoice_from_text(self, raw_text: str) -> Dict[str, Any]:
+        """Parse invoice fields from OCR raw text (fallback for text-only models)."""
+        if not self.is_available:
+            logger.warning("No LLM provider configured, skipping text parsing")
+            return {}
+
+        if not raw_text or not raw_text.strip():
+            return {}
+
+        try:
+            prompt = INVOICE_TEXT_PROMPT.replace("{ocr_text}", raw_text)
+            content = self._client.chat_completion(INVOICE_TEXT_SYSTEM_PROMPT, prompt)
+            return self._parse_json_response(content, self._client.get_protocol_name())
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse LLM text response as JSON: {e}")
+            return {}
+        except Exception as e:
+            logger.error(f"LLM text parsing failed ({self._client.get_protocol_name()}): {e}")
             return {}
 
     def _normalize_field_value(self, field_name: str, value: Any) -> Optional[str]:
@@ -635,18 +380,8 @@ class LLMService:
         return cleaned
 
     def _parse_json_response(self, content: str, provider_name: str) -> Dict[str, Any]:
-        """Parse JSON from LLM response with schema validation and data cleaning.
-
-        Args:
-            content: Raw response content from LLM
-            provider_name: Name of the provider for logging
-
-        Returns:
-            Parsed and validated dictionary of fields
-        """
-        # Try to extract JSON from response
+        """Parse JSON from LLM response with schema validation and data cleaning."""
         if content.startswith("```"):
-            # Remove markdown code blocks
             content = content.split("```")[1]
             if content.startswith("json"):
                 content = content[4:]
@@ -662,31 +397,3 @@ class LLMService:
 
         logger.info(f"LLM ({provider_name}) extracted fields: {list(fields.keys())}")
         return fields
-
-
-# Singleton instance
-_llm_service: Optional[LLMService] = None
-
-
-def get_llm_service() -> LLMService:
-    """Get thread-safe LLMService singleton."""
-    global _llm_service
-    if _llm_service is None:
-        with _llm_lock:
-            # Double-check after acquiring lock
-            if _llm_service is None:
-                _llm_service = LLMService()
-    return _llm_service
-
-
-def reset_llm_service():
-    """Reset the LLM service singleton (useful after config changes).
-
-    Also refreshes the module-level settings to ensure providers
-    see the updated configuration.
-    """
-    global _llm_service, settings
-    with _llm_lock:
-        _llm_service = None
-        # Refresh module-level settings so providers see new config
-        settings = get_settings()

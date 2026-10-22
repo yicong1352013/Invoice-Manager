@@ -4,8 +4,7 @@ import UploadPage from './pages/UploadPage';
 import InvoiceListPage from './pages/InvoiceListPage';
 import InvoiceDetailPage from './pages/InvoiceDetailPage';
 import LoginPage from './pages/LoginPage';
-import UsersPage from './pages/UsersPage';
-import LLMConfigModal from './components/LLMConfigModal';
+import SettingsPage from './pages/SettingsPage';
 import { MainLayout } from './components/layout';
 import { getLLMStatus, getToken, clearToken, getCurrentUser } from './services/api';
 import type { User } from './types/user';
@@ -13,7 +12,6 @@ import type { User } from './types/user';
 function AppContent() {
   const [user, setUser] = useState<User | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
-  const [llmConfigOpen, setLlmConfigOpen] = useState(false);
   const [llmConfigured, setLlmConfigured] = useState<boolean | null>(null);
   const [showLlmPromo, setShowLlmPromo] = useState(false);
   const location = useLocation();
@@ -44,20 +42,20 @@ function AppContent() {
     }
   }, [authChecked, user, location, navigate]);
 
-  // Check LLM status after login (drives the promo banner)
+  // Check LLM status after login (drives the admin promo banner)
   useEffect(() => {
     if (!user) return;
     const checkLLMStatus = async () => {
       try {
         const status = await getLLMStatus();
         setLlmConfigured(status.is_configured);
-        if (!status.is_configured) {
+        // Only admins can fix it, so only they see the promo
+        if (!status.is_configured && user.role === 'admin') {
           setShowLlmPromo(true);
         }
       } catch (error) {
         console.error('Failed to check LLM status:', error);
         setLlmConfigured(false);
-        setShowLlmPromo(true);
       }
     };
     checkLLMStatus();
@@ -88,7 +86,6 @@ function AppContent() {
       onLogout={handleLogout}
       llmConfigured={llmConfigured}
       showLlmPromo={showLlmPromo}
-      onOpenLLMConfig={() => setLlmConfigOpen(true)}
       onCloseLLMPromo={() => setShowLlmPromo(false)}
     >
       <Routes>
@@ -96,20 +93,11 @@ function AppContent() {
         <Route path="/upload" element={<UploadPage />} />
         <Route path="/invoices/:id" element={<InvoiceDetailPage />} />
         <Route
-          path="/users"
-          element={user.role === 'admin' ? <UsersPage currentUser={user} /> : <Navigate to="/" replace />}
+          path="/settings"
+          element={user.role === 'admin' ? <SettingsPage currentUser={user} /> : <Navigate to="/" replace />}
         />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-
-      <LLMConfigModal
-        open={llmConfigOpen}
-        onClose={() => setLlmConfigOpen(false)}
-        onConfigured={() => {
-          setLlmConfigured(true);
-          setShowLlmPromo(false);
-        }}
-      />
     </MainLayout>
   );
 }

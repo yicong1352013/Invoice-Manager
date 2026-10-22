@@ -5,12 +5,17 @@ import type {
   InvoiceListResponse,
   Statistics,
   UploadResponse,
-  LLMStatusResponse,
-  LLMConfigRequest,
-  LLMConfigResponse,
-  LLMTestResponse,
   ModelsResponse,
 } from '../types/invoice';
+import type {
+  AppSettings,
+  AppSettingsUpdateRequest,
+  LLMStatusResponse,
+  LlmProvider,
+  LlmProviderCreateRequest,
+  LlmProviderUpdateRequest,
+  ProviderTestResponse,
+} from '../types/settings';
 import type { User, LoginResponse, UserCreateRequest, UserUpdateRequest } from '../types/user';
 
 const TOKEN_KEY = 'im_token';
@@ -229,40 +234,58 @@ export const batchReprocessInvoices = async (
   return response.data;
 };
 
-// LLM Configuration APIs
+// LLM Provider APIs (settings page)
 
-// Get LLM status
+// Get LLM status (drives the promo banner)
 export const getLLMStatus = async (): Promise<LLMStatusResponse> => {
   const response = await api.get('/settings/llm/status');
   return response.data;
 };
 
-// Configure LLM provider
-export const configureLLM = async (
-  config: LLMConfigRequest,
-  configToken?: string
-): Promise<LLMConfigResponse> => {
-  const response = await api.post('/settings/llm/configure', config, {
-    headers: configToken ? { 'X-LLM-Config-Token': configToken } : undefined,
-  });
+export const listProviders = async (): Promise<LlmProvider[]> => {
+  const response = await api.get('/settings/providers');
   return response.data;
 };
 
-// Test LLM connection
-export const testLLMConnection = async (): Promise<LLMTestResponse> => {
-  const response = await api.post('/settings/llm/test');
+export const createProvider = async (body: LlmProviderCreateRequest): Promise<LlmProvider> => {
+  const response = await api.post('/settings/providers', body);
   return response.data;
 };
 
-// Test LLM config before saving (uses actual provider client library)
-export const testLLMConfig = async (
-  config: { provider: string; api_key: string; model?: string; base_url?: string }
-): Promise<{ success: boolean; message: string; response_time_ms?: number }> => {
-  const response = await api.post('/settings/llm/test-config', config);
+export const updateProvider = async (
+  id: number,
+  body: LlmProviderUpdateRequest
+): Promise<LlmProvider> => {
+  const response = await api.patch(`/settings/providers/${id}`, body);
   return response.data;
 };
 
-// Get available models for a provider
+export const deleteProvider = async (id: number): Promise<void> => {
+  await api.delete(`/settings/providers/${id}`);
+};
+
+export const activateProvider = async (id: number): Promise<LlmProvider> => {
+  const response = await api.post(`/settings/providers/${id}/activate`);
+  return response.data;
+};
+
+export const testSavedProvider = async (id: number): Promise<ProviderTestResponse> => {
+  const response = await api.post(`/settings/providers/${id}/test`);
+  return response.data;
+};
+
+// App settings (OCR engine, MCP)
+export const getAppSettings = async (): Promise<AppSettings> => {
+  const response = await api.get('/settings/app-settings');
+  return response.data;
+};
+
+export const updateAppSettings = async (body: AppSettingsUpdateRequest): Promise<AppSettings> => {
+  const response = await api.put('/settings/app-settings', body);
+  return response.data;
+};
+
+// Get model suggestions for a provider slug (catalog only; free text allowed)
 export const getAvailableModels = async (
   provider?: string,
   visionOnly: boolean = false

@@ -72,11 +72,18 @@ async def _seed_admin() -> None:
 
 @app.on_event("startup")
 async def startup():
-    from app.database import engine, Base
-    from app.models.user import User  # noqa: F401 - register table with Base.metadata
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.database import engine, Base, async_session_maker
+    from app.models.user import User  # noqa: F401 - register tables with Base.metadata
+    from app.models.provider import LlmProvider, AppSetting  # noqa: F401
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await _seed_admin()
+    # Seed preset LLM providers + one-time legacy .env migration
+    from app.services.provider_service import ensure_provider_seeded
+    async with async_session_maker() as db:
+        await ensure_provider_seeded(db)
 
 
 @app.get("/")

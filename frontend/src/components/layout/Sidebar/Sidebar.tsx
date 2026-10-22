@@ -8,25 +8,19 @@ import {
 import styles from './Sidebar.module.css';
 import type { User } from '../../../types/user';
 
-interface NavItem {
-  path: string;
-  label: string;
-}
-
 interface SidebarProps {
   user: User;
   onLogout: () => void;
   llmConfigured: boolean | null;
-  onOpenLLMConfig: () => void;
 }
 
-export default function Sidebar({ user, onLogout, llmConfigured, onOpenLLMConfig }: SidebarProps) {
+export default function Sidebar({ user, onLogout, llmConfigured }: SidebarProps) {
   const location = useLocation();
 
-  const navItems: NavItem[] = [
+  const navItems = [
     { path: '/', label: '发票列表' },
     { path: '/upload', label: '上传发票' },
-    ...(user.role === 'admin' ? [{ path: '/users', label: '用户管理' }] : []),
+    ...(user.role === 'admin' ? [{ path: '/settings', label: '设置' }] : []),
   ];
 
   return (
@@ -50,34 +44,24 @@ export default function Sidebar({ user, onLogout, llmConfigured, onOpenLLMConfig
                 className={`${styles.navItem} ${isActive ? styles.active : ''}`}
               >
                 <span className={styles.navDot} />
-                <span className={styles.navLabel}>{item.label}</span>
+                <span className={styles.navLabel}>
+                  {item.label}
+                  {item.path === '/settings' && llmConfigured === false && (
+                    <Tooltip title="AI 供应商未配置，识别将仅使用本地 OCR" placement="right">
+                      <ExclamationCircleOutlined
+                        style={{ marginLeft: 8, color: 'var(--warning)', fontSize: 12 }}
+                      />
+                    </Tooltip>
+                  )}
+                  {item.path === '/settings' && llmConfigured === true && (
+                    <CheckCircleOutlined
+                      style={{ marginLeft: 8, color: 'var(--success)', fontSize: 12 }}
+                    />
+                  )}
+                </span>
               </Link>
             );
           })}
-
-          {/* Settings (LLM Config) - appears as nav item */}
-          <Tooltip title={llmConfigured ? 'LLM服务已配置' : 'LLM服务未配置，点击配置'} placement="right">
-            <button
-              className={styles.navItem}
-              onClick={onOpenLLMConfig}
-              style={{ border: 'none', background: 'none', width: '100%', textAlign: 'left' }}
-            >
-              <span className={styles.navDot} />
-              <span className={styles.navLabel}>
-                设置
-                {llmConfigured === false && (
-                  <ExclamationCircleOutlined
-                    style={{ marginLeft: 8, color: 'var(--warning)', fontSize: 12 }}
-                  />
-                )}
-                {llmConfigured === true && (
-                  <CheckCircleOutlined
-                    style={{ marginLeft: 8, color: 'var(--success)', fontSize: 12 }}
-                  />
-                )}
-              </span>
-            </button>
-          </Tooltip>
         </nav>
       </div>
 
