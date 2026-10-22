@@ -1,7 +1,7 @@
 from typing import Optional, List
 from io import BytesIO
 from datetime import date
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Query, BackgroundTasks, Request
+from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException, Query, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
@@ -11,6 +11,8 @@ from app.database import get_db
 from app.auth import can_access_invoice, get_current_user
 from app.models.invoice import Invoice, OcrResult, LlmResult, ParsingDiff, InvoiceStatus
 from app.models.user import User, UserRole
+from app.models.attachment import ATTACHMENT_EXTENSIONS, Attachment, AttachmentCategory
+from app.schemas.attachment import AttachmentOut, AttachmentUploadResult, AttachmentUpdateRequest
 from app.schemas.invoice import (
     InvoiceResponse, InvoiceListResponse, InvoiceDetailResponse,
     InvoiceUpdate, BatchUpdateRequest, BatchDeleteRequest, StatisticsResponse, UploadResponse,
@@ -416,6 +418,148 @@ async def get_invoice_file(
         media_type=content_type_map.get(invoice.file_type, "application/octet-stream"),
         headers={"Content-Disposition": f"inline; filename*=UTF-8''{encoded_filename}"}
     )
+
+
+# --- Invoice attachments -----------------------------------------------------
+
+_ATTACHMENT_CONTENT_TYPES = {
+    "pdf": "application/pdf",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "png": "image/png",
+    "doc": "application/msword",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "xls": "application/vnd.ms-excel",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+
+
+async def _get_accessible_invoice(invoice_id: int, user: User, db: AsyncSession) -> Invoice:
+    query = select(Invoice).where(Invoice.id == invoice_id)
+    result = await db.execute(query)
+    invoice = result.scalar_one_or_none()
+    if not invoice:
+        raise HTTPException(status_code=404, detail="发票不存在")
+    _check_invoice_access(invoice, user)
+    return invoice
+
+
+@router.post("/{invoice_id}/attachments", response_model=List[AttachmentUploadResult])
+@limiter.limit("10/minute")
+async def upload_attachments(
+    request: Request,
+    invoice_id: int,
+    background_tasks: BackgroundTasks,
+    files: List[UploadFile] = File(...),
+    category: str = Form("other"),
+    note: Optional[str] = Form(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """为发票上传附件（合同、收货单等），支持多文件。"""
+    await _get_accessible_invoice(invoice_id, current_user, db)
+
+    try:
+        category_enum = AttachmentCategory(category)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"无效的附件分类: {category}")
+
+    results: List[AttachmentUploadResult] = []
+    for file in files:
+        ext = file.filename.split(".")[-1].lower() if file.filename else ""
+        if ext not in ATTACHMENT_EXTENSIONS:
+            results.append(AttachmentUploadResult(
+                id=0, file_name=file.filename or "unknown", status="error",
+                message=f"不支持的附件类型: {ext}",
+            ))
+            continue
+
+        content = await file.read()
+        if len(content) > settings.max_file_size:
+            results.append(AttachmentUploadResult(
+                id=0, file_name=file.filename or "unknown", status="error",
+                message=f"文件过大，最大支持 {settings.max_file_size // 1024 // 1024}MB",
+            ))
+            continue
+
+        attachment = Attachment(
+            invoice_id=invoice_id,
+            category=category_enum,
+            file_name=file.filename or "unknown",
+            file_type=ext,
+            file_data=content,
+            note=note,
+        )
+        db.add(attachment)
+        await db.flush()
+        results.append(AttachmentUploadResult(
+            id=attachment.id, file_name=attachment.file_name,
+            status="success", message="附件上传成功",
+        ))
+
+    await db.commit()
+    return results
+
+
+@router.get("/{invoice_id}/attachments", response_model=List[AttachmentOut])
+async def list_attachments(
+    invoice_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """获取发票的附件列表。"""
+    await _get_accessible_invoice(invoice_id, current_user, db)
+    query = select(Attachment).where(Attachment.invoice_id == invoice_id).order_by(Attachment.id)
+    result = await db.execute(query)
+    attachments = result.scalars().all()
+    out = []
+    for a in attachments:
+        item = AttachmentOut.model_validate(a)
+        item.file_size = len(a.file_data) if a.file_data else 0
+        out.append(item)
+    return out
+
+
+@router.get("/{invoice_id}/attachments/{attachment_id}/file")
+async def get_attachment_file(
+    invoice_id: int,
+    attachment_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """获取附件原始文件（inline 预览）。"""
+    from fastapi.responses import Response
+    from urllib.parse import quote
+
+    await _get_accessible_invoice(invoice_id, current_user, db)
+    attachment = await db.get(Attachment, attachment_id)
+    if not attachment or attachment.invoice_id != invoice_id:
+        raise HTTPException(status_code=404, detail="附件不存在")
+
+    encoded_filename = quote(attachment.file_name)
+    return Response(
+        content=attachment.file_data,
+        media_type=_ATTACHMENT_CONTENT_TYPES.get(attachment.file_type, "application/octet-stream"),
+        headers={"Content-Disposition": f"inline; filename*=UTF-8''{encoded_filename}"}
+    )
+
+
+@router.delete("/{invoice_id}/attachments/{attachment_id}")
+async def delete_attachment(
+    invoice_id: int,
+    attachment_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """删除发票的一个附件。"""
+    await _get_accessible_invoice(invoice_id, current_user, db)
+    attachment = await db.get(Attachment, attachment_id)
+    if not attachment or attachment.invoice_id != invoice_id:
+        raise HTTPException(status_code=404, detail="附件不存在")
+
+    await db.delete(attachment)
+    await db.commit()
+    return {"message": "附件已删除"}
 
 
 @router.put("/{invoice_id}", response_model=InvoiceResponse)

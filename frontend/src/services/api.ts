@@ -17,6 +17,9 @@ import type {
   ProviderTestResponse,
 } from '../types/settings';
 import type { User, LoginResponse, UserCreateRequest, UserUpdateRequest } from '../types/user';
+import type {
+  Attachment, AttachmentCategory, AttachmentUploadResult,
+} from '../types/attachment';
 
 const TOKEN_KEY = 'im_token';
 
@@ -232,6 +235,47 @@ export const batchReprocessInvoices = async (
     invoice_ids: invoiceIds,
   });
   return response.data;
+};
+
+// Attachment APIs
+export const uploadAttachments = async (
+  invoiceId: number,
+  files: File[],
+  category: AttachmentCategory = 'other',
+  note?: string
+): Promise<AttachmentUploadResult[]> => {
+  const formData = new FormData();
+  files.forEach((file) => formData.append('files', file));
+  formData.append('category', category);
+  if (note) {
+    formData.append('note', note);
+  }
+  const response = await api.post(`/invoices/${invoiceId}/attachments`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
+  return response.data;
+};
+
+export const listAttachments = async (invoiceId: number): Promise<Attachment[]> => {
+  const response = await api.get(`/invoices/${invoiceId}/attachments`);
+  return response.data;
+};
+
+export const deleteAttachment = async (invoiceId: number, attachmentId: number): Promise<void> => {
+  await api.delete(`/invoices/${invoiceId}/attachments/${attachmentId}`);
+};
+
+export const updateAttachment = async (
+  attachmentId: number,
+  body: { invoice_id?: number; category?: AttachmentCategory; note?: string }
+): Promise<Attachment> => {
+  const response = await api.patch(`/attachments/${attachmentId}`, body);
+  return response.data;
+};
+
+export const getAttachmentFileUrl = (invoiceId: number, attachmentId: number): string => {
+  const token = getToken();
+  return `/api/invoices/${invoiceId}/attachments/${attachmentId}/file${token ? `?token=${encodeURIComponent(token)}` : ''}`;
 };
 
 // LLM Provider APIs (settings page)

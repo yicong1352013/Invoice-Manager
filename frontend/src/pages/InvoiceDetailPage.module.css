@@ -428,3 +428,43 @@
   justify-content: center;
   min-height: 400px;
 }
+
+/* Attachments */
+.attachmentRow {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-base);
+  padding: var(--spacing-sm) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.attachmentRow:last-child {
+  border-bottom: none;
+}
+
+.attachmentCategory {
+  flex-shrink: 0;
+  font-size: var(--font-size-xs);
+  color: var(--muted-foreground);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-base);
+  padding: 1px 8px;
+}
+
+.attachmentName {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--foreground);
+}
+
+.attachmentName:hover {
+  color: var(--red-primary);
+}
+
+.attachmentSize {
+  flex-shrink: 0;
+  font-size: var(--font-size-xs);
+  color: var(--muted-foreground);
+}

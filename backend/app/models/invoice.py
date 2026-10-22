@@ -11,6 +11,8 @@ from app.database import Base
 
 # Import AuditLog to ensure it's registered with Base.metadata
 from app.models.audit_log import AuditLog  # noqa: F401
+# Import Attachment so the Invoice.attachments relationship can resolve
+from app.models.attachment import Attachment  # noqa: F401
 
 
 class InvoiceStatus(str, Enum):
@@ -64,6 +66,7 @@ class Invoice(Base):
     ocr_result = relationship("OcrResult", back_populates="invoice", uselist=False, cascade="all, delete-orphan")
     llm_result = relationship("LlmResult", back_populates="invoice", uselist=False, cascade="all, delete-orphan")
     parsing_diffs = relationship("ParsingDiff", back_populates="invoice", cascade="all, delete-orphan")
+    attachments = relationship("Attachment", back_populates="invoice", cascade="all, delete-orphan")
 
 
 class OcrResult(Base):

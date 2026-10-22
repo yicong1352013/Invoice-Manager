@@ -187,3 +187,29 @@
 .viewListButton:hover {
   opacity: 0.85;
 }
+
+/* Mixed upload: file type table + attachment assignment rows */
+.fileNameCell {
+  font-family: var(--font-secondary);
+  font-size: var(--font-size-base);
+  color: var(--foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assignRow {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-base);
+  padding: var(--spacing-sm) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.assignRow:last-of-type {
+  border-bottom: none;
+}
+
+.assignRow .fileNameCell {
+  flex: 0 1 220px;
+}

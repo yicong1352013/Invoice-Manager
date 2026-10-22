@@ -4,7 +4,14 @@ from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 
 from app.config import get_settings
-from app.routers import auth as auth_router, users as users_router, health, invoices, settings as settings_router
+from app.routers import (
+    attachments as attachments_router,
+    auth as auth_router,
+    health,
+    invoices,
+    settings as settings_router,
+    users as users_router,
+)
 from app.rate_limit import limiter
 
 settings = get_settings()
@@ -40,6 +47,7 @@ app.include_router(health.router, prefix="/api", tags=["Health"])
 app.include_router(auth_router.router, prefix="/api/auth", tags=["Auth"])
 app.include_router(users_router.router, prefix="/api/users", tags=["Users"])
 app.include_router(invoices.router, prefix="/api/invoices", tags=["Invoices"])
+app.include_router(attachments_router.router, prefix="/api/attachments", tags=["Attachments"])
 app.include_router(settings_router.router, prefix="/api/settings", tags=["Settings"])
 
 
@@ -77,6 +85,7 @@ async def startup():
     from app.database import engine, Base, async_session_maker
     from app.models.user import User  # noqa: F401 - register tables with Base.metadata
     from app.models.provider import LlmProvider, AppSetting  # noqa: F401
+    from app.models.attachment import Attachment  # noqa: F401
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await _seed_admin()

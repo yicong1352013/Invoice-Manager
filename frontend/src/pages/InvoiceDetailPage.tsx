@@ -14,14 +14,29 @@ import {
 } from 'antd';
 import {
   ArrowLeftOutlined,
+  DeleteOutlined,
   EditOutlined,
+  PaperClipOutlined,
   SaveOutlined,
   SyncOutlined,
   CheckCircleOutlined,
   CloseCircleOutlined,
   DownloadOutlined,
 } from '@ant-design/icons';
-import { getInvoice, getInvoiceFileUrl, updateInvoice, resolveDiff, confirmInvoice, reprocessInvoice } from '../services/api';
+import {
+  deleteAttachment,
+  getAttachmentFileUrl,
+  getInvoice,
+  getInvoiceFileUrl,
+  listAttachments,
+  resolveDiff,
+  confirmInvoice,
+  reprocessInvoice,
+  updateInvoice,
+  uploadAttachments,
+} from '../services/api';
+import type { Attachment, AttachmentCategory } from '../types/attachment';
+import { ATTACHMENT_CATEGORY_LABELS } from '../types/attachment';
 import type { InvoiceDetail } from '../types/invoice';
 import { InvoiceStatus } from '../types/invoice';
 import StatusTag from '../components/StatusTag';
@@ -60,6 +75,54 @@ function InvoiceDetailPage() {
     fieldName: '',
   });
   const [customValue, setCustomValue] = useState('');
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [attachmentsUploading, setAttachmentsUploading] = useState(false);
+  const [attachmentFiles, setAttachmentFiles] = useState<File[]>([]);
+  const [attachmentCategory, setAttachmentCategory] = useState<AttachmentCategory>('other');
+  const [attachmentModalOpen, setAttachmentModalOpen] = useState(false);
+
+  const fetchAttachments = async () => {
+    if (!id) return;
+    try {
+      setAttachments(await listAttachments(parseInt(id)));
+    } catch {
+      // non-fatal: the invoice itself still renders
+    }
+  };
+
+  const handleUploadAttachments = async () => {
+    if (!id || attachmentFiles.length === 0) {
+      message.warning('请先选择附件文件');
+      return;
+    }
+    setAttachmentsUploading(true);
+    try {
+      const results = await uploadAttachments(parseInt(id), attachmentFiles, attachmentCategory);
+      const successCount = results.filter((r) => r.status === 'success').length;
+      const failCount = results.filter((r) => r.status === 'error').length;
+      if (successCount) message.success(`已上传 ${successCount} 个附件`);
+      if (failCount) message.error(`${failCount} 个附件上传失败`);
+      setAttachmentFiles([]);
+      setAttachmentModalOpen(false);
+      fetchAttachments();
+    } catch (error) {
+      message.error('附件上传失败');
+      console.error(error);
+    } finally {
+      setAttachmentsUploading(false);
+    }
+  };
+
+  const handleDeleteAttachment = async (attachmentId: number) => {
+    if (!id) return;
+    try {
+      await deleteAttachment(parseInt(id), attachmentId);
+      message.success('附件已删除');
+      fetchAttachments();
+    } catch {
+      message.error('删除附件失败');
+    }
+  };
 
   const fetchInvoice = async () => {
     if (!id) return;
@@ -79,6 +142,8 @@ function InvoiceDetailPage() {
 
   useEffect(() => {
     fetchInvoice();
+    fetchAttachments();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   const handleSave = async () => {
@@ -575,8 +640,91 @@ function InvoiceDetailPage() {
               </div>
             </div>
           </div>
+
+          {/* Attachments */}
+          <div className={styles.previewCard}>
+            <div className={styles.previewHeader}>
+              <span className={styles.previewTitle}>
+                <PaperClipOutlined style={{ marginRight: 6 }} />
+                附件（{attachments.length}）
+              </span>
+              <div className={styles.previewControls}>
+                <Button size="small" onClick={() => setAttachmentModalOpen(true)}>
+                  上传附件
+                </Button>
+              </div>
+            </div>
+            <div className={styles.previewBody}>
+              {attachments.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: 16, color: 'var(--muted-foreground)' }}>
+                  暂无附件（可上传合同、收货单等）
+                </div>
+              ) : (
+                attachments.map((attachment) => (
+                  <div key={attachment.id} className={styles.attachmentRow}>
+                    <span className={styles.attachmentCategory}>
+                      {ATTACHMENT_CATEGORY_LABELS[attachment.category] || attachment.category}
+                    </span>
+                    <a
+                      className={styles.attachmentName}
+                      href={getAttachmentFileUrl(invoice.id, attachment.id)}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      {attachment.file_name}
+                    </a>
+                    <span className={styles.attachmentSize}>
+                      {attachment.file_size ? `${(attachment.file_size / 1024).toFixed(0)} KB` : ''}
+                    </span>
+                    <Button
+                      size="small"
+                      type="text"
+                      danger
+                      icon={<DeleteOutlined />}
+                      onClick={() => handleDeleteAttachment(attachment.id)}
+                    />
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
         </div>
       </div>
+
+      {/* Attachment Upload Modal */}
+      <Modal
+        title="上传附件"
+        open={attachmentModalOpen}
+        onOk={handleUploadAttachments}
+        onCancel={() => {
+          setAttachmentModalOpen(false);
+          setAttachmentFiles([]);
+        }}
+        confirmLoading={attachmentsUploading}
+        okText="上传"
+        cancelText="取消"
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div>
+            <span style={{ marginRight: 8 }}>附件分类：</span>
+            <Select
+              value={attachmentCategory}
+              style={{ width: 140 }}
+              onChange={setAttachmentCategory}
+              options={(Object.keys(ATTACHMENT_CATEGORY_LABELS) as AttachmentCategory[]).map((c) => ({
+                value: c,
+                label: ATTACHMENT_CATEGORY_LABELS[c],
+              }))}
+            />
+          </div>
+          <input
+            type="file"
+            multiple
+            onChange={(e) => setAttachmentFiles(Array.from(e.target.files ?? []))}
+            accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.xls,.xlsx"
+          />
+        </div>
+      </Modal>
     </div>
   );
 }
