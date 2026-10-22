@@ -387,10 +387,12 @@ async def get_invoice_file(
     # URL-encode filename for Content-Disposition header (RFC 5987)
     encoded_filename = quote(invoice.file_name)
 
+    # 'inline' lets Chrome/Edge preview PDFs/images in iframes; the RFC 5987
+    # filename is kept so "save as" still gets the original name
     return Response(
         content=invoice.file_data,
         media_type=content_type_map.get(invoice.file_type, "application/octet-stream"),
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"}
+        headers={"Content-Disposition": f"inline; filename*=UTF-8''{encoded_filename}"}
     )
 
 
