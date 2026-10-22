@@ -334,13 +334,59 @@ POST /api/invoices/batch-reprocess
 # 统计数据 | Statistics
 GET /api/invoices/statistics
 
-# LLM配置 | LLM Configuration
-GET  /api/settings/llm/status
-POST /api/settings/llm/configure
-POST /api/settings/llm/test
+# 导出 | Export（csv / excel / word / pdf，均含合计行）
+GET /api/invoices/export/{format}?status=CONFIRMED&start_date=2026-01-01
+
+# 打印 | Print（选中发票原件合并为一个 PDF）
+GET /api/invoices/print-merge?invoice_ids=1,2,3
+
+# 附件 | Attachments
+POST   /api/invoices/{id}/attachments   (multipart, category=contract|receipt|other)
+GET    /api/invoices/{id}/attachments
+GET    /api/invoices/{id}/attachments/{aid}/file
+DELETE /api/invoices/{id}/attachments/{aid}
+PATCH  /api/attachments/{aid}           (改关联/分类)
+
+# 认证与用户 | Auth & Users（JWT，普通用户按归属人隔离）
+POST   /api/auth/login
+GET    /api/auth/me
+GET/POST /api/users · PATCH/DELETE /api/users/{id}   (管理员)
+
+# 供应商与设置 | Providers & Settings（管理员，密钥脱敏返回）
+GET/POST /api/settings/providers · PATCH/DELETE /api/settings/providers/{id}
+POST   /api/settings/providers/{id}/activate
+POST   /api/settings/providers/{id}/test · POST /api/settings/providers/test
+GET/PUT /api/settings/app-settings   (OCR引擎/百度云凭据/MCP开关与令牌)
 ```
 
 完整 API 文档请访问 http://localhost:18080/docs
+
+### MCP 接口（外部 AI 智能体） | MCP Interface
+
+在 **设置页 → MCP** 中开启并设置访问令牌后，系统提供只读 MCP（Model Context Protocol）端点，
+供 Claude 等外部 AI 智能体直接查询发票数据：
+
+| 工具 | 说明 |
+|------|------|
+| `list_invoices` | 发票列表（状态/归属人/日期筛选 + 分页） |
+| `get_invoice_detail` | 发票详情（含 OCR/LLM 识别结果与字段差异） |
+| `get_statistics` | 数量与金额汇总 |
+| `list_attachments` | 附件（合同/收货单）元数据 |
+| `get_invoice_file` | 发票原始文件（base64，可直接交给视觉模型） |
+
+```json
+// 客户端配置示例（支持远程 MCP 的客户端）
+{
+  "mcpServers": {
+    "invoice-manager": {
+      "url": "http://localhost:18080/api/mcp",
+      "headers": { "Authorization": "Bearer <你的MCP令牌>" }
+    }
+  }
+}
+```
+
+> 令牌为管理员级只读凭证，请妥善保管；未开启或未设置令牌时端点返回 404。
 
 ---
 
@@ -348,11 +394,12 @@ POST /api/settings/llm/test
 
 - [x] **v0.1** - 基础OCR识别 + 发票管理
 - [x] **v0.2** - 多LLM支持 + 双源验证
-- [x] **v0.3** - UI全面改版 + OpenRouter模型支持 ✨ **当前版本**
-- [ ] **v0.4** - 报表导出 (Excel/PDF)
-- [ ] **v0.5** - 多用户权限管理
-- [ ] **v0.6** - 发票真伪验证 (对接税务API)
-- [ ] **v0.7** - 移动端适配
+- [x] **v0.3** - UI全面改版 + OpenRouter模型支持
+- [x] **v0.4** - 用户权限管理 · 供应商配置页(自定义OpenAI/Anthropic兼容端点) ·
+  OCR优先LLM兜底 + PaddleOCR 3.x + 百度云端识别 · 发票附件 ·
+  Word/PDF导出+合计行 · 批量打印原件 · MCP只读接口 ✨ **当前版本**
+- [ ] **v0.5** - 发票真伪验证 (对接税务API)
+- [ ] **v0.6** - 移动端适配
 - [ ] **v1.0** - 企业级功能 (审批流程、ERP集成)
 
 欢迎提 Issue 告诉我们你最需要的功能！
