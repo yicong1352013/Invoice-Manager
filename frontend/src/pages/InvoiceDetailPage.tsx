@@ -17,6 +17,7 @@ import {
   DeleteOutlined,
   EditOutlined,
   PaperClipOutlined,
+  PrinterOutlined,
   SaveOutlined,
   SyncOutlined,
   CheckCircleOutlined,
@@ -28,6 +29,7 @@ import {
   getAttachmentFileUrl,
   getInvoice,
   getInvoiceFileUrl,
+  getToken,
   listAttachments,
   resolveDiff,
   confirmInvoice,
@@ -122,6 +124,16 @@ function InvoiceDetailPage() {
     } catch {
       message.error('删除附件失败');
     }
+  };
+
+  const handlePrintOriginal = () => {
+    if (!id) return;
+    const params = new URLSearchParams({ invoice_ids: id });
+    const token = getToken();
+    if (token) {
+      params.append('token', token);
+    }
+    window.open(`/api/invoices/print-merge?${params.toString()}`, '_blank');
   };
 
   const fetchInvoice = async () => {
@@ -612,6 +624,9 @@ function InvoiceDetailPage() {
             <div className={styles.previewHeader}>
               <span className={styles.previewTitle}>原始文件</span>
               <div className={styles.previewControls}>
+                <Button size="small" onClick={handlePrintOriginal}>
+                  <PrinterOutlined /> 打印
+                </Button>
                 <a
                   href={getInvoiceFileUrl(invoice.id)}
                   download

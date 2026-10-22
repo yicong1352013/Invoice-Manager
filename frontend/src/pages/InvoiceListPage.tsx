@@ -14,18 +14,20 @@ import {
   Statistic,
   Row,
   Col,
+  Dropdown,
 } from 'antd';
 import {
   EyeOutlined,
   DeleteOutlined,
-  UploadOutlined,
-  ReloadOutlined,
   DownloadOutlined,
+  PrinterOutlined,
+  ReloadOutlined,
   SyncOutlined,
+  UploadOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
-import { listInvoices, deleteInvoice, batchUpdateInvoices, batchDeleteInvoices, batchReprocessInvoices, getStatistics } from '../services/api';
+import { getToken, listInvoices, deleteInvoice, batchUpdateInvoices, batchDeleteInvoices, batchReprocessInvoices, getStatistics } from '../services/api';
 import type { Invoice, Statistics } from '../types/invoice';
 import { InvoiceStatus } from '../types/invoice';
 import ResizableTitle from '../components/ResizableTitle';
@@ -210,7 +212,7 @@ function InvoiceListPage() {
     });
   };
 
-  const handleExport = (format: 'csv' | 'excel') => {
+  const handleExport = (format: 'csv' | 'excel' | 'word' | 'pdf') => {
     const params = new URLSearchParams();
 
     if (selectedRowKeys.length > 0) {
@@ -229,8 +231,26 @@ function InvoiceListPage() {
       params.append('end_date', dateRange[1].format('YYYY-MM-DD'));
     }
 
+    const token = getToken();
+    if (token) {
+      params.append('token', token);
+    }
     const url = `/api/invoices/export/${format}?${params.toString()}`;
     window.open(url, '_blank');
+  };
+
+  const handlePrint = () => {
+    if (selectedRowKeys.length === 0) {
+      message.warning('请先勾选要打印的发票');
+      return;
+    }
+    const params = new URLSearchParams({ invoice_ids: selectedRowKeys.join(',') });
+    const token = getToken();
+    if (token) {
+      params.append('token', token);
+    }
+    // The merged original-file PDF opens inline in the browser viewer, ready to print
+    window.open(`/api/invoices/print-merge?${params.toString()}`, '_blank');
   };
 
   // All column definitions
@@ -549,12 +569,28 @@ function InvoiceListPage() {
           <p className={styles.pageSubtitle}>管理和查看所有发票记录</p>
         </div>
         <div className={styles.headerActions}>
+          <Dropdown
+            menu={{
+              items: [
+                { key: 'excel', label: '导出 Excel' },
+                { key: 'csv', label: '导出 CSV' },
+                { key: 'word', label: '导出 Word' },
+                { key: 'pdf', label: '导出 PDF' },
+              ],
+              onClick: ({ key }) => handleExport(key as 'csv' | 'excel' | 'word' | 'pdf'),
+            }}
+          >
+            <Button icon={<DownloadOutlined />} className={styles.secondaryButton}>
+              导出
+            </Button>
+          </Dropdown>
           <Button
-            icon={<DownloadOutlined />}
-            onClick={() => handleExport('excel')}
+            icon={<PrinterOutlined />}
+            onClick={handlePrint}
+            disabled={selectedRowKeys.length === 0}
             className={styles.secondaryButton}
           >
-            导出
+            打印{selectedRowKeys.length > 0 ? ` (${selectedRowKeys.length})` : ''}
           </Button>
           <Button
             type="primary"

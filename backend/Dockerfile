@@ -12,6 +12,7 @@ RUN for i in 1 2 3 4 5; do \
         libxext6 \
         libxrender1 \
         poppler-utils \
+        fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/* \
     && break || sleep 15; \
     done

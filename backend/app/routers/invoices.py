@@ -323,6 +323,45 @@ async def get_statistics(
     )
 
 
+@router.get("/print-merge")
+@limiter.limit("10/minute")
+async def print_merge_invoices(
+    request: Request,
+    invoice_ids: str = Query(..., description="要打印的发票ID列表，逗号分隔"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """将选中发票的原始文件合并为一个 PDF（浏览器内直接打印）"""
+    from urllib.parse import quote
+
+    from app.services.export_service import merge_original_files
+
+    ids = _parse_invoice_ids(invoice_ids)
+    result = await db.execute(
+        select(Invoice).where(Invoice.id.in_(ids)).order_by(Invoice.created_at.desc())
+    )
+    invoices = [
+        inv for inv in result.scalars().all()
+        if can_access_invoice(current_user, inv.owner)
+    ]
+    if not invoices:
+        raise HTTPException(status_code=404, detail="未找到可打印的发票")
+
+    try:
+        pdf_bytes = merge_original_files([(inv.file_type, inv.file_data) for inv in invoices])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    filename = quote('发票打印.pdf')
+    return StreamingResponse(
+        BytesIO(pdf_bytes),
+        media_type='application/pdf',
+        headers={
+            'Content-Disposition': f"inline; filename*=UTF-8''{filename}"
+        }
+    )
+
+
 @router.get("/{invoice_id}", response_model=InvoiceDetailResponse)
 async def get_invoice(
     invoice_id: int,
@@ -1136,6 +1175,15 @@ async def export_invoices_csv(
             inv.created_at.strftime('%Y-%m-%d %H:%M:%S') if inv.created_at else ''
         ])
 
+    # Totals row
+    from app.services.export_service import compute_totals
+    totals = compute_totals(invoices)
+    writer.writerow([
+        '合计', '', '', '', '', '', '',
+        str(totals['amount']), str(totals['tax_amount']), str(totals['total_with_tax']),
+        '', '', '', '', '',
+    ])
+
     output.seek(0)
 
     filename = quote('发票导出.csv')
@@ -1243,6 +1291,20 @@ async def export_invoices_excel(
             cell.border = thin_border
 
     # Auto-adjust column widths
+    # Totals row
+    from app.services.export_service import compute_totals
+    totals = compute_totals(invoices)
+    totals_row_index = len(invoices) + 2
+    totals_values = [
+        '合计', '', '', '', '', '', '',
+        float(totals['amount']), float(totals['tax_amount']), float(totals['total_with_tax']),
+        '', '', '', '', '',
+    ]
+    for col, value in enumerate(totals_values, 1):
+        cell = ws.cell(row=totals_row_index, column=col, value=value)
+        cell.font = header_font
+        cell.border = thin_border
+
     for col in ws.columns:
         max_length = 0
         column = col[0].column_letter
@@ -1263,6 +1325,98 @@ async def export_invoices_excel(
     return StreamingResponse(
         output,
         media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={
+            'Content-Disposition': f"attachment; filename*=UTF-8''{filename}"
+        }
+    )
+
+
+def _build_export_query(
+    invoice_ids: Optional[str],
+    status: Optional[InvoiceStatus],
+    owner: Optional[str],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    current_user: User,
+):
+    """Shared filter for export endpoints (non-admins are owner-scoped)."""
+    query = select(Invoice)
+    ids = _parse_invoice_ids(invoice_ids)
+    if ids:
+        query = query.where(Invoice.id.in_(ids))
+    if status:
+        query = query.where(Invoice.status == status)
+    if current_user.role != UserRole.ADMIN:
+        query = query.where(Invoice.owner == current_user.username)
+    elif owner:
+        query = query.where(Invoice.owner == owner)
+    start_date_obj = _parse_date_param(start_date, "start_date")
+    if start_date_obj:
+        query = query.where(Invoice.issue_date >= start_date_obj)
+    end_date_obj = _parse_date_param(end_date, "end_date")
+    if end_date_obj:
+        query = query.where(Invoice.issue_date <= end_date_obj)
+    return query.order_by(Invoice.created_at.desc())
+
+
+@router.get("/export/word")
+@limiter.limit("10/minute")
+async def export_invoices_word(
+    request: Request,
+    invoice_ids: Optional[str] = Query(None, description="发票ID列表，逗号分隔"),
+    status: Optional[InvoiceStatus] = Query(None, description="状态筛选"),
+    owner: Optional[str] = Query(None, description="归属人筛选"),
+    start_date: Optional[str] = Query(None, description="开始日期"),
+    end_date: Optional[str] = Query(None, description="结束日期"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """导出发票为 Word 格式（明细表+合计行）"""
+    from urllib.parse import quote
+
+    from app.services.export_service import build_word_export, compute_totals
+
+    result = await db.execute(_build_export_query(invoice_ids, status, owner, start_date, end_date, current_user))
+    invoices = result.scalars().all()
+    totals = compute_totals(invoices)
+
+    output = build_word_export(invoices, totals)
+    filename = quote('发票导出.docx')
+    return StreamingResponse(
+        output,
+        media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        headers={
+            'Content-Disposition': f"attachment; filename*=UTF-8''{filename}"
+        }
+    )
+
+
+@router.get("/export/pdf")
+@limiter.limit("10/minute")
+async def export_invoices_pdf(
+    request: Request,
+    invoice_ids: Optional[str] = Query(None, description="发票ID列表，逗号分隔"),
+    status: Optional[InvoiceStatus] = Query(None, description="状态筛选"),
+    owner: Optional[str] = Query(None, description="归属人筛选"),
+    start_date: Optional[str] = Query(None, description="开始日期"),
+    end_date: Optional[str] = Query(None, description="结束日期"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """导出发票为 PDF 格式（明细表+合计行）"""
+    from urllib.parse import quote
+
+    from app.services.export_service import build_pdf_export, compute_totals
+
+    result = await db.execute(_build_export_query(invoice_ids, status, owner, start_date, end_date, current_user))
+    invoices = result.scalars().all()
+    totals = compute_totals(invoices)
+
+    output = build_pdf_export(invoices, totals)
+    filename = quote('发票导出.pdf')
+    return StreamingResponse(
+        output,
+        media_type='application/pdf',
         headers={
             'Content-Disposition': f"attachment; filename*=UTF-8''{filename}"
         }
