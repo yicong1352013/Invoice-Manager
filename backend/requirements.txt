@@ -1,7 +1,8 @@
 # FastAPI and server
-fastapi==0.109.0
-uvicorn[standard]==0.27.0
-python-multipart==0.0.6
+# fastapi>=0.159 required: fastmcp needs starlette>=1.x which fastapi 0.109 cannot use
+fastapi>=0.159,<1.0
+uvicorn[standard]>=0.27
+python-multipart>=0.0.6
 
 # Database
 sqlalchemy==2.0.25
@@ -23,8 +24,8 @@ google-generativeai>=0.8.0,<1.0
 
 # Utilities
 python-dotenv==1.0.0
-pydantic==2.5.3
-pydantic-settings==2.1.0
+pydantic>=2.14,<3.0
+pydantic-settings>=2.1
 Pillow==10.2.0
 pdf2image==1.17.0
 pdfplumber==0.10.3
@@ -34,6 +35,9 @@ openpyxl==3.1.2
 python-docx>=1.1,<2.0
 reportlab>=4.0,<5.0
 pypdf>=4.0,<6.0
+
+# MCP server for external AI agents
+fastmcp>=2.3,<3.0
 
 # Rate limiting
 slowapi==0.1.9
