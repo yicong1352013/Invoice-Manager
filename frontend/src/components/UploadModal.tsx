@@ -621,7 +621,7 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
           <div className={styles.previewBox}>
             {preview.ext === 'pdf' ? (
               <iframe
-                src={preview.url}
+                src={`${preview.url}#zoom=page-fit`}
                 title={preview.name}
                 className={styles.previewFrame}
               />

@@ -646,7 +646,7 @@ function InvoiceDetailPage() {
               <div className={styles.previewContent}>
                 {invoice.file_type === 'pdf' ? (
                   <iframe
-                    src={getInvoiceFileUrl(invoice.id)}
+                    src={`${getInvoiceFileUrl(invoice.id)}#zoom=page-fit`}
                     style={{ width: '100%', height: 'calc(100vh - 220px)', border: 'none' }}
                     title="PDF Preview"
                   />
@@ -722,7 +722,7 @@ function InvoiceDetailPage() {
       >
         {invoice.file_type === 'pdf' ? (
           <iframe
-            src={getInvoiceFileUrl(invoice.id)}
+            src={`${getInvoiceFileUrl(invoice.id)}#zoom=page-fit`}
             style={{ width: '100%', height: '80vh', border: 'none' }}
             title="PDF Fullscreen Preview"
           />
