@@ -180,7 +180,7 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
   }, [open, lastNewInvoiceId]);
 
   const closePreview = () => {
-    if (preview) {
+    if (preview?.url.startsWith('blob:')) {
       URL.revokeObjectURL(preview.url);
     }
     setPreview(null);
@@ -192,6 +192,11 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
       message.info('该格式暂不支持在线预览，可下载后查看');
     }
     setPreview({ url: URL.createObjectURL(file), name: file.name, ext });
+  };
+
+  /** Preview an uploaded invoice's original file on top of this modal. */
+  const openInvoicePreview = (inv: Invoice) => {
+    setPreview({ url: getInvoiceFileUrl(inv.id), name: inv.file_name, ext: inv.file_type });
   };
 
   const refreshBatch = useCallback(async () => {
@@ -342,17 +347,24 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
     {
       title: '缩略图',
       width: 60,
-      render: (_, record) =>
-        record.file_type === 'pdf' ? (
-          <FilePdfOutlined style={{ fontSize: 24, color: 'var(--muted-foreground)' }} />
-        ) : (
-          <img
-            src={getInvoiceFileUrl(record.id)}
-            alt={record.file_name}
-            className={styles.thumb}
-            loading="lazy"
-          />
-        ),
+      render: (_, record) => (
+        <span
+          className={styles.thumbLink}
+          title="点击预览"
+          onClick={() => openInvoicePreview(record)}
+        >
+          {record.file_type === 'pdf' ? (
+            <FilePdfOutlined style={{ fontSize: 24, color: 'var(--muted-foreground)' }} />
+          ) : (
+            <img
+              src={getInvoiceFileUrl(record.id)}
+              alt={record.file_name}
+              className={styles.thumb}
+              loading="lazy"
+            />
+          )}
+        </span>
+      ),
     },
     {
       title: '发票号码',
@@ -382,14 +394,22 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
     {
       title: '操作',
       key: 'actions',
-      width: 150,
+      width: 210,
       render: (_, record) => (
         <>
           <Button
             type="link"
             size="small"
             icon={<EyeOutlined />}
+            onClick={() => openInvoicePreview(record)}
+          >
+            预览
+          </Button>
+          <Button
+            type="link"
+            size="small"
             onClick={() => {
+              closePreview();
               onClose();
               navigate(`/invoices/${record.id}`);
             }}
@@ -439,16 +459,17 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
   );
 
   return (
-    <Modal
-      title="发票上传"
-      open={open}
-      onCancel={() => {
-        closePreview();
-        onClose();
-      }}
-      width={1040}
-      destroyOnClose
-      footer={
+    <>
+      <Modal
+        title="发票上传"
+        open={open}
+        onCancel={() => {
+          closePreview();
+          onClose();
+        }}
+        width={1040}
+        destroyOnClose
+        footer={
         <div className={styles.footerBar}>
           <span className={styles.footerHint}>
             支持批量上传；发票上传后自动识别，附件将关联到所选发票
@@ -590,13 +611,17 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
           )
         )}
       </div>
+      </Modal>
 
-      {/* File preview (local object URL) */}
+      {/* File preview (local object URL or an uploaded invoice original) —
+          rendered as a sibling so it never participates in the upload
+          modal's lifecycle and stays on top of it */}
       <Modal
         title={preview?.name}
         open={preview !== null}
         onCancel={closePreview}
         width={880}
+        zIndex={1050}
         footer={
           preview && (
             <a href={preview.url} download={preview.name}>
@@ -623,6 +648,6 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
           </div>
         )}
       </Modal>
-    </Modal>
+    </>
   );
 }

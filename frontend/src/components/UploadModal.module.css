@@ -106,6 +106,20 @@
   border: 1px solid #e5e7eb;
 }
 
+.thumbLink {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 54px;
+  cursor: pointer;
+}
+
+.thumbLink:hover {
+  border-color: var(--red-primary, #e42313);
+  border-radius: 4px;
+}
+
 .hiddenInput {
   display: none;
 }
