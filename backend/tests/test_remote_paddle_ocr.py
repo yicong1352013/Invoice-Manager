@@ -21,7 +21,10 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from app.services.ocr_service import RemotePaddleOCRService, parse_remote_paddle_response
+from app.services.ocr_service import (
+    OCRService, RemotePaddleOCRService, parse_remote_paddle_pages,
+    parse_remote_paddle_response,
+)
 
 
 def _page(texts, scores, y0=0):
@@ -203,6 +206,44 @@ def test_api_key_kept_on_multipart_fallback(monkeypatch):
     assert service._multipart_mode is True
     headers = fake.calls[1][1]["headers"]
     assert headers["X-API-Key"] == "proxy-secret-1"
+
+
+def test_remote_service_sends_whole_pdf_natively(monkeypatch):
+    """A configured remote endpoint must OCR digital PDFs itself (fileType=0)
+    instead of the local text-layer shortcut or a poppler rasterizer."""
+    service = RemotePaddleOCRService("http://192.168.66.32:8080/ocr")
+    assert service.prefer_text_layer is False
+    assert OCRService().prefer_text_layer is True
+
+    two_pages = {
+        "errorCode": 0,
+        "result": {"ocrResults": [
+            _page(["第一页甲", "第一页乙"], [0.9, 0.91], y0=0),
+            _page(["第二页丙"], [0.95], y0=100),  # page-local y overlaps page 1
+        ], "dataInfo": {"type": "pdf"}},
+    }
+    monkeypatch.setattr("httpx.post", _FakeHttpx([_resp(200, two_pages)]))
+
+    text, confidence, lines = service.process_pdf(b"%PDF-fake")
+    assert "第一页甲" in text and "第二页丙" in text
+    # page order preserved even though page 2's local y (100) would sort
+    # between page 1's lines without the page offset
+    assert [l["text"] for l in lines] == ["第一页甲", "第一页乙", "第二页丙"]
+    assert confidence is not None
+
+
+def test_parse_remote_paddle_pages_keeps_pages_separate():
+    two_pages = {
+        "errorCode": 0,
+        "result": {"ocrResults": [
+            _page(["第一页文本"], [0.9], y0=0),
+            _page(["第二页文本"], [0.95], y0=100),
+        ]},
+    }
+    pages = parse_remote_paddle_pages(two_pages)
+    assert len(pages) == 2
+    assert pages[0][0][0] == "第一页文本"
+    assert pages[1][0][0] == "第二页文本"
 
 
 def test_process_image_reports_average_confidence(monkeypatch):

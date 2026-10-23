@@ -101,3 +101,49 @@ def test_extraction_immune_to_cipher_pollution():
     assert fields["invoice_number"] == "246813570139"
     assert fields["amount"] == "100.00"
     assert fields["tax_amount"] == "6.00"
+
+
+# --- single-side label regression (invoice 13060593) --------------------------------
+#
+# The buyer block's vertical 购/买/方 label is interleaved with 密/码/区 and
+# never matches, while the footer "销 售 方:（章）" DOES match as a seller
+# label. With only one side labeled, proximity classification used to push
+# BOTH 名称 values and BOTH tax ids onto the seller side — duplicating the
+# buyer's data into the seller fields.
+
+INVOICE_13060593_TEXT = """广东增值税电子普通发票 发票代码:044002400112
+发票号码:13060593
+﹊﹋﹌ 开票日期:2025年09月13日
+校 验 码:12839 43449 64643 96198
+机器编号: 499097989374
+名 称: 广东浩鲸科技有限公司
+购 密
+纳税人识别号: 91440300MA5EKPEL7P
+买 码
+地 址、电 话:
+方 区
+开户行及账号:
+项目名称 车牌号 类型 通行日期起 通行日期止 金 额 税率 税 额
+*经营租赁*通行费 湘ALQ163 客车 20250912 20250912 32.92 3% 0.99
+合 计 ￥32.92 ￥0.99
+价税合计（大写） 叁拾叁元玖角壹分 （小写） ￥33.91
+名 称:广深珠高速公路有限公司
+销 备
+纳税人识别号:914400006174026084
+售
+地 址、电 话:广东省广州市越秀区竹丝岗大马路10号之一首层自编G号0769-85555585
+方 注
+开户行及账号:中国银行虎门支行725057753788
+收 款 人: 黄绍芬 复 核: 黄绍芬 开 票 人: 谢慧洁 销 售 方:（章）"""
+
+
+def test_single_side_label_does_not_duplicate_buyer_into_seller():
+    fields = FieldExtractor().extract_fields(INVOICE_13060593_TEXT, [])
+    assert fields["buyer_name"] == "广东浩鲸科技有限公司", fields["buyer_name"]
+    assert fields["buyer_tax_id"] == "91440300MA5EKPEL7P", fields["buyer_tax_id"]
+    assert fields["seller_name"] == "广深珠高速公路有限公司", fields["seller_name"]
+    assert fields["seller_tax_id"] == "914400006174026084", fields["seller_tax_id"]
+    assert fields["invoice_number"] == "13060593"
+    assert fields["amount"] == "32.92"
+    assert fields["tax_amount"] == "0.99"
+    assert fields["total_with_tax"] == "33.91"

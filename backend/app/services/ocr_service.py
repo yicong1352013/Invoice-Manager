@@ -44,6 +44,12 @@ _extractor_lock = threading.Lock()
 class OCRService:
     """Handles OCR processing for invoice images using PaddleOCR."""
 
+    # True: digital PDFs take the pdfplumber text-layer shortcut (fast,
+    # offline). Remote deployments flip this off — a configured GPU service
+    # is more accurate than regex over the raw text layer, and its line
+    # metadata powers the position-aware field extraction.
+    prefer_text_layer = True
+
     def __init__(self):
         self._ocr = None
         self._init_lock = threading.Lock()
@@ -293,13 +299,15 @@ class OCRService:
         Returns:
             Tuple of (extracted_text, average_confidence, ocr_lines)
         """
-        # First try to extract embedded text layer
-        text_layer, has_useful_text = self._extract_pdf_text_layer(pdf_data)
+        # First try to extract embedded text layer (in-process engine only —
+        # see prefer_text_layer)
+        if self.prefer_text_layer:
+            text_layer, has_useful_text = self._extract_pdf_text_layer(pdf_data)
 
-        if has_useful_text:
-            logger.info("Using PDF embedded text layer instead of OCR")
-            # High confidence for embedded text
-            return text_layer, 99.0, []
+            if has_useful_text:
+                logger.info("Using PDF embedded text layer instead of OCR")
+                # High confidence for embedded text
+                return text_layer, 99.0, []
 
         # Fall back to OCR for scanned PDFs
         logger.info("PDF has no useful text layer, falling back to OCR")
@@ -335,20 +343,12 @@ class OCRService:
             raise
 
 
-def parse_remote_paddle_response(payload: Any) -> list:
-    """Tolerant parser for PaddleX-style OCR HTTP results.
+def parse_remote_paddle_pages(payload: Any) -> List[list]:
+    """Parse a PaddleX-style OCR response into per-page normalized lines.
 
-    Supported shapes (normalized to [(text, confidence|None, poly), ...]):
-    - PaddleX AIStudio-style serving (paddlex --serve, JSON body):
-      {"errorCode": 0, "result": {"ocrResults": [{"prunedResult":
-          {"rec_texts": [...], "rec_scores": [...], "rec_polys"/"dt_polys": [...]}}]}}
-      Multiple ocrResults entries are PDF pages and are concatenated in order.
-    - Plain PaddleX pipeline serving (multipart upload):
-      {"result": {"rec_texts": [...], "rec_scores": [...], "dt_polys": [...]}}
-      (also accepted at the payload root)
-
-    Lines without a score keep confidence=None so the pipeline judges by
-    field completeness, exactly like the Baidu structured engine.
+    Returns [[(text, confidence|None, poly), ...], ...] — one list per
+    ocrResults entry (PDF pages in order). See parse_remote_paddle_response
+    for the accepted payload shapes.
     """
 
     def from_result_dict(data: Dict[str, Any]) -> list:
@@ -371,20 +371,35 @@ def parse_remote_paddle_response(payload: Any) -> list:
     if not isinstance(result, (dict, list)):
         result = payload
 
+    pages: List[list] = []
     if isinstance(result, dict):
         ocr_results = result.get("ocrResults")
         if isinstance(ocr_results, list) and ocr_results:
-            out: list = []
             for item in ocr_results:
                 if isinstance(item, dict):
                     pruned = item.get("prunedResult")
                     inner = pruned if isinstance(pruned, dict) else item
-                    out.extend(from_result_dict(inner))
-            if out:
-                return out
-        return from_result_dict(result)
+                    pages.append(from_result_dict(inner))
+        else:
+            pages.append(from_result_dict(result))
+    elif isinstance(result, list) and result and isinstance(result[0], dict):
+        pages.append(from_result_dict(result[0]))
 
-    return []
+    return [p for p in pages if p]
+
+
+def parse_remote_paddle_response(payload: Any) -> list:
+    """Flatten a PaddleX-style OCR response into normalized lines.
+
+    Multiple ocrResults entries are PDF pages and concatenate in order.
+    Lines without a score keep confidence=None so the pipeline judges by
+    field completeness, exactly like the Baidu structured engine.
+    """
+    return [
+        line
+        for page in parse_remote_paddle_pages(payload)
+        for line in page
+    ]
 
 
 class RemotePaddleOCRService(OCRService):
@@ -405,6 +420,14 @@ class RemotePaddleOCRService(OCRService):
     checks; the naked service ignores unknown headers.
     """
 
+    # configured remote service wins over the PDF text-layer shortcut:
+    # GPU OCR accuracy + line metadata beat regex over raw embedded text
+    prefer_text_layer = False
+
+    # pages are stacked with a huge Y offset so reading order stays
+    # page 1..N after position-based line sorting
+    _PAGE_Y_STRIDE = 1_000_000
+
     def __init__(self, endpoint: str, api_key: Optional[str] = None, timeout: float = 120.0):
         super().__init__()
         self.endpoint = endpoint.strip().rstrip("/")
@@ -420,7 +443,7 @@ class RemotePaddleOCRService(OCRService):
             "X-API-Key": self.api_key,
         }
 
-    def _post(self, image_bytes: bytes):
+    def _post(self, image_bytes: bytes, file_type: int = 1):
         import httpx
 
         headers = self._auth_headers()
@@ -431,7 +454,7 @@ class RemotePaddleOCRService(OCRService):
         b64 = base64.b64encode(image_bytes).decode("utf-8")
         return httpx.post(
             self.endpoint,
-            json={"file": b64, "fileType": 1},
+            json={"file": b64, "fileType": file_type},
             headers=headers,
             timeout=self.timeout,
         )
@@ -457,6 +480,43 @@ class RemotePaddleOCRService(OCRService):
                 f"远程 PaddleOCR 服务返回错误: {payload.get('errorMsg') or payload.get('errorCode')}"
             )
         return parse_remote_paddle_response(payload)
+
+    def process_pdf(self, pdf_data: bytes) -> Tuple[str, Optional[float], List[Dict[str, Any]]]:
+        """Recognize a whole PDF natively on the remote service (fileType=0).
+
+        The service renders pages itself (≤20 pages) and returns one
+        ocrResults entry per page, so no local rasterizer (poppler) is
+        needed. Pages are stacked with a large Y offset to keep reading
+        order stable through the position-based line sorting.
+        """
+        resp = self._post(pdf_data, file_type=0)
+        if resp.status_code >= 400 and not self._multipart_mode:
+            self._multipart_mode = True
+            resp = self._post(pdf_data, file_type=0)
+        resp.raise_for_status()
+
+        payload = resp.json()
+        if isinstance(payload, dict) and payload.get("errorCode") not in (None, 0):
+            raise RuntimeError(
+                f"远程 PaddleOCR 服务返回错误: {payload.get('errorMsg') or payload.get('errorCode')}"
+            )
+
+        pages = parse_remote_paddle_pages(payload)
+        all_lines: List[Dict[str, Any]] = []
+        all_confidences: List[Optional[float]] = []
+        for page_index, page in enumerate(pages):
+            _, confidences, line_items = self._build_line_items(page)
+            offset = page_index * self._PAGE_Y_STRIDE
+            for item in line_items:
+                item["min_y"] += offset
+                item["max_y"] += offset
+                item["center_y"] += offset
+                all_lines.append(item)
+            all_confidences.extend(confidences)
+
+        all_lines = self._sort_lines_by_position(all_lines)
+        combined = "\n".join(line["text"] for line in all_lines)
+        return combined, self._average_confidence(all_confidences), all_lines
 
 
 class FieldExtractor:
@@ -732,17 +792,35 @@ class FieldExtractor:
         name_pattern = r'(?:名\s*)?称[：:]\s*(.+)$'
         name_matches = [(m.start(), m.group(1)) for m in re.finditer(name_pattern, text, re.MULTILINE)]
 
+        # Proximity classification needs BOTH sides' labels. With only one
+        # side labeled (e.g. the footer "销 售 方:（章）" matches while the
+        # buyer's vertical 购/买/方 is interleaved with 密/码/区), every match
+        # would land on the labeled side and duplicate one block into both.
+        # The position-based fallback below handles the single-side case.
+        both_sides_labeled = bool(label_positions['buyer'] and label_positions['seller'])
+
         if name_matches and not (result['buyer_name'] and result['seller_name']):
             buyers = []
             sellers = []
 
-            for pos, name in name_matches:
-                classification = self._classify_by_proximity(pos, label_positions)
-                cleaned_name = self._clean_chinese_spaces(name)
-                if classification == 'buyer':
-                    buyers.append(cleaned_name)
-                else:
-                    sellers.append(cleaned_name)
+            if both_sides_labeled:
+                for pos, name in name_matches:
+                    classification = self._classify_by_proximity(pos, label_positions)
+                    cleaned_name = self._clean_chinese_spaces(name)
+                    if classification == 'buyer':
+                        buyers.append(cleaned_name)
+                    else:
+                        sellers.append(cleaned_name)
+            else:
+                # no usable labels: positional order — first 名称 is the buyer
+                # block, second is the seller block
+                for _, name in name_matches[:2]:
+                    cleaned_name = self._clean_chinese_spaces(name)
+                    if not result['buyer_name']:
+                        result['buyer_name'] = cleaned_name
+                        continue
+                    if not result['seller_name']:
+                        result['seller_name'] = cleaned_name
 
             if buyers:
                 result['buyer_name'] = buyers[0]
@@ -766,12 +844,20 @@ class FieldExtractor:
             buyer_tax_ids = []
             seller_tax_ids = []
 
-            for pos, tax_id in tax_matches:
-                classification = self._classify_by_proximity(pos, label_positions)
-                if classification == 'buyer':
-                    buyer_tax_ids.append(tax_id.strip())
-                else:
-                    seller_tax_ids.append(tax_id.strip())
+            if both_sides_labeled:
+                for pos, tax_id in tax_matches:
+                    classification = self._classify_by_proximity(pos, label_positions)
+                    if classification == 'buyer':
+                        buyer_tax_ids.append(tax_id.strip())
+                    else:
+                        seller_tax_ids.append(tax_id.strip())
+            else:
+                # no usable labels: positional order — buyer block first
+                for _, tax_id in tax_matches[:2]:
+                    if not buyer_tax_ids:
+                        buyer_tax_ids.append(tax_id.strip())
+                    else:
+                        seller_tax_ids.append(tax_id.strip())
 
             if buyer_tax_ids:
                 result['buyer_tax_id'] = buyer_tax_ids[0]
