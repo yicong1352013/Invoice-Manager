@@ -13,6 +13,29 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# Cipher-zone tokens on paper VAT invoices: long runs over
+# [0-9A-Za-z<>+*/=-] with several symbol separators. Real values never look
+# like this — tax IDs are pure alnum, phones/amounts carry at most one symbol,
+# short model codes stay under the length bar, and Chinese text breaks the
+# charset. Observed cipher rows are ≥20 chars, so ≥16 chars with ≥2 symbols
+# marks cipher text. PaddleOCR merges the left cipher column into the seller
+# block's rows, polluting seller_name/item_name otherwise.
+_CIPHER_TOKEN = re.compile(r"[0-9A-Za-z<>/+*=\-]{16,}")
+
+
+def strip_cipher_tokens(text: str) -> str:
+    """Remove VAT cipher-zone fragments from one OCR line, keeping real values."""
+    if not text:
+        return text
+
+    def _clean(match: "re.Match[str]") -> str:
+        token = match.group(0)
+        specials = sum(token.count(c) for c in "<>+/=*-")
+        return "" if specials >= 2 else token
+
+    cleaned = _CIPHER_TOKEN.sub(_clean, text)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).rstrip()
+
 # Thread lock for singleton initialization
 _ocr_lock = threading.Lock()
 _extractor_lock = threading.Lock()
@@ -134,7 +157,11 @@ class OCRService:
                 conf_score = confidence * 100
             else:
                 conf_score = confidence
-            text_lines.append(text)
+            cleaned_text = strip_cipher_tokens(text)
+            if not cleaned_text.strip():
+                # pure cipher line — nothing real survived the cleanup
+                continue
+            text_lines.append(cleaned_text)
             confidences.append(conf_score)
 
             xs = [p[0] for p in poly if isinstance(p, (list, tuple)) and len(p) >= 2]
@@ -143,7 +170,7 @@ class OCRService:
                 min_x, max_x = min(xs), max(xs)
                 min_y, max_y = min(ys), max(ys)
                 line_items.append({
-                    "text": text,
+                    "text": cleaned_text,
                     "confidence": conf_score,
                     "bbox": poly,
                     "min_x": min_x,
@@ -221,7 +248,13 @@ class OCRService:
                     for page in pdf.pages:
                         text = page.extract_text()
                         if text:
-                            all_text.append(text)
+                            # Digital VAT PDFs carry the cipher zone in their
+                            # text layer, row-merged into seller-block lines by
+                            # pdfplumber — same cleanup as the OCR image path.
+                            all_text.append("\n".join(
+                                line for line in (strip_cipher_tokens(l) for l in text.splitlines())
+                                if line.strip()
+                            ))
 
                 combined_text = "\n".join(all_text)
 
