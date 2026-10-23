@@ -281,8 +281,12 @@
 
 /* Right Panel - PDF Preview */
 .rightPanel {
-  width: 420px;
-  flex-shrink: 0;
+  flex: 0 0 45%;
+  max-width: 780px;
+  min-width: 420px;
+  position: sticky;
+  top: var(--spacing-xl);
+  align-self: flex-start;
 }
 
 .previewCard {

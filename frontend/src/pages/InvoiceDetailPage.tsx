@@ -16,6 +16,7 @@ import {
   ArrowLeftOutlined,
   DeleteOutlined,
   EditOutlined,
+  FullscreenOutlined,
   PaperClipOutlined,
   PrinterOutlined,
   SaveOutlined,
@@ -82,6 +83,7 @@ function InvoiceDetailPage() {
   const [attachmentFiles, setAttachmentFiles] = useState<File[]>([]);
   const [attachmentCategory, setAttachmentCategory] = useState<AttachmentCategory>('other');
   const [attachmentModalOpen, setAttachmentModalOpen] = useState(false);
+  const [previewFullscreen, setPreviewFullscreen] = useState(false);
 
   const fetchAttachments = async () => {
     if (!id) return;
@@ -627,6 +629,9 @@ function InvoiceDetailPage() {
                 <Button size="small" onClick={handlePrintOriginal}>
                   <PrinterOutlined /> 打印
                 </Button>
+                <Button size="small" onClick={() => setPreviewFullscreen(true)}>
+                  <FullscreenOutlined /> 全屏
+                </Button>
                 <a
                   href={getInvoiceFileUrl(invoice.id)}
                   download
@@ -642,14 +647,14 @@ function InvoiceDetailPage() {
                 {invoice.file_type === 'pdf' ? (
                   <iframe
                     src={getInvoiceFileUrl(invoice.id)}
-                    style={{ width: '100%', height: 600, border: 'none' }}
+                    style={{ width: '100%', height: 'calc(100vh - 220px)', border: 'none' }}
                     title="PDF Preview"
                   />
                 ) : (
                   <img
                     src={getInvoiceFileUrl(invoice.id)}
                     alt="Invoice"
-                    style={{ width: '100%', maxHeight: 600, objectFit: 'contain' }}
+                    style={{ width: '100%', maxHeight: 'calc(100vh - 220px)', objectFit: 'contain' }}
                   />
                 )}
               </div>
@@ -705,6 +710,32 @@ function InvoiceDetailPage() {
           </div>
         </div>
       </div>
+
+      {/* Fullscreen original-file preview */}
+      <Modal
+        title={`原始文件 - ${invoice.file_name}`}
+        open={previewFullscreen}
+        onCancel={() => setPreviewFullscreen(false)}
+        width="94vw"
+        footer={null}
+        centered
+      >
+        {invoice.file_type === 'pdf' ? (
+          <iframe
+            src={getInvoiceFileUrl(invoice.id)}
+            style={{ width: '100%', height: '80vh', border: 'none' }}
+            title="PDF Fullscreen Preview"
+          />
+        ) : (
+          <div style={{ textAlign: 'center' }}>
+            <img
+              src={getInvoiceFileUrl(invoice.id)}
+              alt="Invoice"
+              style={{ maxWidth: '100%', maxHeight: '80vh', objectFit: 'contain' }}
+            />
+          </div>
+        )}
+      </Modal>
 
       {/* Attachment Upload Modal */}
       <Modal

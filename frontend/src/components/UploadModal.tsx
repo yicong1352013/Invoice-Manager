@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Button, Modal, Popconfirm, Select, Table, Tag, message } from 'antd';
+import { Button, Input, Modal, Popconfirm, Select, Table, Tag, message } from 'antd';
 import {
-  DeleteOutlined, EyeOutlined, FilePdfOutlined, PaperClipOutlined,
-  RedoOutlined, UploadOutlined,
+  DeleteOutlined, DownloadOutlined, EyeOutlined, FilePdfOutlined,
+  PaperClipOutlined, RedoOutlined, UploadOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
@@ -21,6 +21,7 @@ const INVOICE_EXTS = ['pdf', 'jpg', 'jpeg', 'png'];
 const ATTACHMENT_EXTS = [...INVOICE_EXTS, 'doc', 'docx', 'xls', 'xlsx'];
 const MAX_FILE_MB = 10;
 const PROCESSING_STATUSES = ['已上传', '解析中'];
+const PREVIEWABLE_EXTS = [...INVOICE_EXTS];
 
 const statusColors: Record<string, string> = {
   '已上传': 'default',
@@ -41,12 +42,20 @@ interface PendingAttachment {
   uid: string;
   file: File;
   category: AttachmentCategory;
+  note?: string;
   targetInvoiceId?: number;
 }
 
+/** antd Select option: must use {value, label} — {id, label} renders but never selects */
 interface InvoiceOption {
-  id: number;
+  value: number;
   label: string;
+}
+
+interface PreviewState {
+  url: string;
+  name: string;
+  ext: string;
 }
 
 function formatSize(bytes: number): string {
@@ -73,7 +82,9 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
   const [batchInvoices, setBatchInvoices] = useState<Invoice[]>([]);
   const [existingOptions, setExistingOptions] = useState<InvoiceOption[]>([]);
   const [newOptions, setNewOptions] = useState<InvoiceOption[]>([]);
+  const [lastNewInvoiceId, setLastNewInvoiceId] = useState<number | undefined>(undefined);
   const [uploading, setUploading] = useState(false);
+  const [preview, setPreview] = useState<PreviewState | null>(null);
   const invoiceInputRef = useRef<HTMLInputElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const batchIdsRef = useRef<number[]>([]);
@@ -81,7 +92,7 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
 
   const invoiceOptions = useMemo(
     () => [...newOptions, ...existingOptions.filter(
-      (e) => !newOptions.some((n) => n.id === e.id)
+      (e) => !newOptions.some((n) => n.value === e.value)
     )],
     [newOptions, existingOptions]
   );
@@ -90,8 +101,9 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
     try {
       const data = await listInvoices({ page: 1, page_size: 100 });
       setExistingOptions(data.items.map((inv) => ({
-        id: inv.id,
-        label: `#${inv.id} ${inv.invoice_number || inv.file_name}`,
+        value: inv.id,
+        // file name is what users recognize; invoice_number may still be blank
+        label: `#${inv.id} ${inv.file_name}`,
       })));
     } catch {
       // non-fatal: this-batch invoices remain selectable
@@ -105,14 +117,15 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
       setAttachmentRows([]);
       setBatchInvoices([]);
       setNewOptions([]);
+      setLastNewInvoiceId(undefined);
       prevHadProcessingRef.current = false;
       loadExistingOptions();
     }
   }, [open, loadExistingOptions]);
 
   const addFiles = (files: File[], allowedExts: string[], kind: 'invoice' | 'attachment') => {
-    const accepted: PendingFile[] = [];
-    const acceptedAttachments: PendingAttachment[] = [];
+    const invoices: PendingFile[] = [];
+    const attachments: PendingAttachment[] = [];
     for (const file of files) {
       const ext = fileExt(file.name);
       if (!allowedExts.includes(ext)) {
@@ -124,20 +137,22 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
         continue;
       }
       if (kind === 'invoice') {
-        accepted.push({ uid: `${file.name}-${file.size}-${Date.now()}-${Math.random()}`, file });
+        invoices.push({ uid: `${file.name}-${file.size}-${Date.now()}-${Math.random()}`, file });
       } else {
-        acceptedAttachments.push({
+        // default target: the most recently uploaded invoice of this batch
+        attachments.push({
           uid: `${file.name}-${file.size}-${Date.now()}-${Math.random()}`,
           file,
           category: 'other',
+          targetInvoiceId: lastNewInvoiceId,
         });
       }
     }
-    if (kind === 'invoice' && accepted.length > 0) {
-      setInvoiceFiles((prev) => [...prev, ...accepted]);
+    if (invoices.length > 0) {
+      setInvoiceFiles((prev) => [...prev, ...invoices]);
     }
-    if (kind === 'attachment' && acceptedAttachments.length > 0) {
-      setAttachmentRows((prev) => [...prev, ...acceptedAttachments]);
+    if (attachments.length > 0) {
+      setAttachmentRows((prev) => [...prev, ...attachments]);
     }
   };
 
@@ -164,7 +179,22 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
     document.addEventListener('paste', onPaste);
     return () => document.removeEventListener('paste', onPaste);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [open, lastNewInvoiceId]);
+
+  const closePreview = () => {
+    if (preview) {
+      URL.revokeObjectURL(preview.url);
+    }
+    setPreview(null);
+  };
+
+  const openPreview = (file: File) => {
+    const ext = fileExt(file.name);
+    if (!PREVIEWABLE_EXTS.includes(ext)) {
+      message.info('该格式暂不支持在线预览，可下载后查看');
+    }
+    setPreview({ url: URL.createObjectURL(file), name: file.name, ext });
+  };
 
   const refreshBatch = useCallback(async () => {
     const ids = batchIdsRef.current;
@@ -219,36 +249,31 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
           const details = await Promise.all(okIds.map((id) => getInvoice(id)));
           setBatchInvoices(details);
           setNewOptions((prev) => [
-            ...details.map((d) => ({ id: d.id, label: `#${d.id} ${d.invoice_number || d.file_name}（本次上传）` })),
+            ...details.map((d) => ({ value: d.id, label: `#${d.id} ${d.file_name}（本次上传）` })),
             ...prev,
           ]);
+          const lastId = okIds[okIds.length - 1];
+          setLastNewInvoiceId(lastId);
+          // default unassigned attachments to the most recently uploaded invoice
+          setAttachmentRows((prev) => prev.map((r) => (r.targetInvoiceId ? r : { ...r, targetInvoiceId: lastId })));
         }
         setInvoiceFiles([]);
       }
 
-      // 2) attachments — each row needs a target invoice
+      // 2) attachments — one request per file so each keeps its own note
       if (attachmentRows.length > 0) {
-        const fallbackTarget = uploadedIds[0];
+        const fallbackTarget = lastNewInvoiceId ?? uploadedIds[uploadedIds.length - 1];
         const unassigned = attachmentRows.filter((r) => !r.targetInvoiceId && !fallbackTarget);
         if (unassigned.length > 0) {
           message.warning('请为每个附件选择关联的发票');
           return;
         }
 
-        const groups = new Map<string, { invoiceId: number; category: AttachmentCategory; files: File[] }>();
+        let attachOk = 0;
         for (const row of attachmentRows) {
           const target = row.targetInvoiceId ?? fallbackTarget;
-          const key = `${target}:${row.category}`;
-          if (!groups.has(key)) {
-            groups.set(key, { invoiceId: target, category: row.category, files: [] });
-          }
-          groups.get(key)!.files.push(row.file);
-        }
-
-        let attachOk = 0;
-        for (const group of groups.values()) {
           try {
-            const results = await uploadAttachments(group.invoiceId, group.files, group.category);
+            const results = await uploadAttachments(target, [row.file], row.category, row.note);
             attachOk += results.filter((r) => r.status === 'success').length;
             for (const r of results) {
               if (r.status !== 'success') {
@@ -256,7 +281,7 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
               }
             }
           } catch (error) {
-            message.error(`附件上传失败（发票 #${group.invoiceId}）`);
+            message.error(`附件上传失败：${row.file.name}`);
             console.error(error);
           }
         }
@@ -283,7 +308,7 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
     try {
       await deleteInvoice(inv.id);
       setBatchInvoices((prev) => prev.filter((i) => i.id !== inv.id));
-      setNewOptions((prev) => prev.filter((o) => o.id !== inv.id));
+      setNewOptions((prev) => prev.filter((o) => o.value !== inv.id));
       onCompleted();
     } catch {
       message.error('删除失败');
@@ -386,12 +411,28 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
     },
   ];
 
-  const renderFileRow = (uid: string, name: string, size: number, extra: React.ReactNode, onRemove: () => void) => (
+  const fileNameLink = (name: string, file: File) => (
+    <a
+      className={styles.fileNameLink}
+      onClick={() => openPreview(file)}
+      title="点击预览"
+    >
+      {name}
+    </a>
+  );
+
+  const renderFileRow = (
+    uid: string,
+    name: string,
+    file: File,
+    extra: React.ReactNode,
+    onRemove: () => void
+  ) => (
     <div key={uid} className={styles.fileRow}>
       <PaperClipOutlined style={{ color: 'var(--muted-foreground)', fontSize: 12 }} />
-      <span className={styles.fileName}>{name}</span>
+      {fileNameLink(name, file)}
       {extra}
-      <span className={styles.fileSize}>{formatSize(size)}</span>
+      <span className={styles.fileSize}>{formatSize(file.size)}</span>
       <Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={onRemove} />
     </div>
   );
@@ -400,8 +441,11 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
     <Modal
       title="发票上传"
       open={open}
-      onCancel={onClose}
-      width={960}
+      onCancel={() => {
+        closePreview();
+        onClose();
+      }}
+      width={1040}
       destroyOnClose
       footer={
         <div className={styles.footerBar}>
@@ -450,7 +494,7 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
           }}
         />
         {invoiceFiles.map((p) =>
-          renderFileRow(p.uid, p.file.name, p.file.size, null, () =>
+          renderFileRow(p.uid, p.file.name, p.file, null, () =>
             setInvoiceFiles((prev) => prev.filter((f) => f.uid !== p.uid))
           )
         )}
@@ -514,7 +558,7 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
           renderFileRow(
             row.uid,
             row.file.name,
-            row.file.size,
+            row.file,
             <>
               <Select
                 size="small"
@@ -531,7 +575,7 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
               <Select
                 size="small"
                 showSearch
-                style={{ width: 220 }}
+                style={{ width: 230 }}
                 placeholder="选择关联发票"
                 value={row.targetInvoiceId}
                 onChange={(targetInvoiceId) => setAttachmentRows((prev) =>
@@ -540,11 +584,54 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
                 optionFilterProp="label"
                 options={invoiceOptions}
               />
+              <Input
+                size="small"
+                style={{ width: 130 }}
+                placeholder="备注"
+                value={row.note}
+                maxLength={200}
+                onChange={(e) => setAttachmentRows((prev) =>
+                  prev.map((r) => (r.uid === row.uid ? { ...r, note: e.target.value } : r))
+                )}
+              />
             </>,
             () => setAttachmentRows((prev) => prev.filter((r) => r.uid !== row.uid))
           )
         )}
       </div>
+
+      {/* File preview (local object URL) */}
+      <Modal
+        title={preview?.name}
+        open={preview !== null}
+        onCancel={closePreview}
+        width={880}
+        footer={
+          preview && (
+            <a href={preview.url} download={preview.name}>
+              <Button icon={<DownloadOutlined />}>下载</Button>
+            </a>
+          )
+        }
+      >
+        {preview && (
+          <div className={styles.previewBox}>
+            {preview.ext === 'pdf' ? (
+              <iframe
+                src={preview.url}
+                title={preview.name}
+                className={styles.previewFrame}
+              />
+            ) : PREVIEWABLE_EXTS.includes(preview.ext) ? (
+              <img src={preview.url} alt={preview.name} className={styles.previewFrame} />
+            ) : (
+              <div className={styles.previewUnsupported}>
+                该格式（{preview.ext}）暂不支持在线预览，请下载后查看
+              </div>
+            )}
+          </div>
+        )}
+      </Modal>
     </Modal>
   );
 }

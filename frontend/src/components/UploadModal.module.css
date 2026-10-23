@@ -38,6 +38,40 @@
   font-size: 13px;
 }
 
+.fileNameLink {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.fileNameLink:hover {
+  text-decoration: underline;
+}
+
+.previewBox {
+  display: flex;
+  justify-content: center;
+  background: #fafafa;
+}
+
+.previewFrame {
+  width: 100%;
+  height: 560px;
+  border: none;
+  object-fit: contain;
+  background: #fff;
+}
+
+.previewUnsupported {
+  padding: 48px 16px;
+  text-align: center;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
 .fileSize {
   color: var(--muted-foreground);
   font-size: 12px;
