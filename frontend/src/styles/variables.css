@@ -59,9 +59,9 @@
   --spacing-4xl: 48px;
 
   /* Layout */
-  --sidebar-width: 240px;
-  --sidebar-padding-x: 32px;
-  --sidebar-padding-y: 40px;
+  --sidebar-width: 220px;
+  --sidebar-padding-x: 20px;
+  --sidebar-padding-y: 20px;
   --content-padding-x: 48px;
   --content-padding-y: 40px;
   --header-height: 64px;

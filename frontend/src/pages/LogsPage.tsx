@@ -4,10 +4,10 @@ import {
 } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
-import dayjs from 'dayjs';
 import type { Dayjs } from 'dayjs';
 import { getLogActions, getLogs } from '../services/api';
 import type { AuditLogEntry } from '../types/log';
+import { formatBackendTime } from '../utils/time';
 import styles from './LogsPage.module.css';
 
 const ACTION_COLORS: Record<string, string> = {
@@ -93,21 +93,22 @@ export default function LogsPage() {
       title: '时间',
       dataIndex: 'created_at',
       key: 'created_at',
-      width: 160,
-      render: (val: string) => dayjs(val).format('YYYY-MM-DD HH:mm:ss'),
+      width: 170,
+      render: (val: string) => formatBackendTime(val, 'YYYY-MM-DD HH:mm:ss'),
     },
     {
       title: '操作人',
       dataIndex: 'user_id',
       key: 'user_id',
-      width: 120,
+      width: 110,
+      ellipsis: true,
       render: (val: string | null) => val || '系统',
     },
     {
       title: '动作',
       dataIndex: 'action',
       key: 'action',
-      width: 120,
+      width: 110,
       render: (val: string) => (
         <Tag color={ACTION_COLORS[val] || 'default'}>{describeAction(val)}</Tag>
       ),
@@ -115,7 +116,7 @@ export default function LogsPage() {
     {
       title: '对象',
       key: 'target',
-      width: 180,
+      width: 190,
       ellipsis: true,
       render: (_, record) => describeTarget(record),
     },
@@ -128,10 +129,9 @@ export default function LogsPage() {
     },
     {
       title: '详情',
-      dataIndex: 'details',
       key: 'details',
       ellipsis: true,
-      render: (val: string | null) => val || '-',
+      render: (_, record) => record.details || (record.new_value?.error as string) || '-',
     },
   ];
 

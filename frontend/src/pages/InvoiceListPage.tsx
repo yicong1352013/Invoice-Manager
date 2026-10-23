@@ -27,6 +27,7 @@ import {
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
+import { formatBackendTime } from '../utils/time';
 import { getToken, listInvoices, deleteInvoice, batchUpdateInvoices, batchDeleteInvoices, batchReprocessInvoices, getStatistics } from '../services/api';
 import type { Invoice, Statistics } from '../types/invoice';
 import { InvoiceStatus } from '../types/invoice';
@@ -48,6 +49,7 @@ const statusColors: Record<string, string> = {
   '已确认': 'success',
   '已报销': 'green',
   '未报销': 'orange',
+  '解析失败': 'red',
 };
 
 function InvoiceListPage() {
@@ -476,7 +478,7 @@ function InvoiceListPage() {
         dataIndex: 'created_at',
         key: 'created_at',
         width: columnWidths.created_at,
-        render: (val) => (val ? dayjs(val).format('YYYY-MM-DD HH:mm') : '-'),
+        render: (val) => formatBackendTime(val),
         onHeaderCell: () => ({
           width: columnWidths.created_at,
           onResize: handleColumnResize('created_at'),
@@ -487,7 +489,7 @@ function InvoiceListPage() {
         dataIndex: 'updated_at',
         key: 'updated_at',
         width: columnWidths.updated_at,
-        render: (val) => (val ? dayjs(val).format('YYYY-MM-DD HH:mm') : '-'),
+        render: (val) => formatBackendTime(val),
         onHeaderCell: () => ({
           width: columnWidths.updated_at,
           onResize: handleColumnResize('updated_at'),

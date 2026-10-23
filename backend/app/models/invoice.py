@@ -23,6 +23,7 @@ class InvoiceStatus(str, Enum):
     CONFIRMED = "已确认"     # Manually reviewed and confirmed
     REIMBURSED = "已报销"    # Reimbursement completed
     NOT_REIMBURSED = "未报销" # Not yet reimbursed
+    FAILED = "解析失败"      # Recognition failed after retries; reprocess to retry
 
 
 class Invoice(Base):

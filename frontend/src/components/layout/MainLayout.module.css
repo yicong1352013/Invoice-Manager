@@ -12,6 +12,11 @@
   min-height: 100vh;
   display: flex;
   flex-direction: column;
+  transition: margin-left var(--transition-fast);
+}
+
+.mainContentCollapsed {
+  margin-left: 64px;
 }
 
 /* Content Wrapper */

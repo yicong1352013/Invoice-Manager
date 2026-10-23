@@ -8,11 +8,12 @@ from enum import Enum
 class InvoiceStatus(str, Enum):
     UPLOADED = "已上传"      # File uploaded, waiting for OCR processing
     PROCESSING = "解析中"    # OCR/LLM processing in progress
-    PENDING = "待处理"       # Processing complete, no conflicts
+    PENDING = "待处理"       # Processing complete, no conflicts (legacy, kept for compatibility)
     REVIEWING = "待审核"     # Has conflicts or missing fields, needs manual review
     CONFIRMED = "已确认"     # Manually reviewed and confirmed
     REIMBURSED = "已报销"    # Reimbursement completed
     NOT_REIMBURSED = "未报销" # Not yet reimbursed
+    FAILED = "解析失败"      # Recognition failed after retries; reprocess to retry
 
 
 class InvoiceBase(BaseModel):

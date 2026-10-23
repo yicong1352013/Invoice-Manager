@@ -1,4 +1,4 @@
-import { ReactNode } from 'react';
+import { ReactNode, useState } from 'react';
 import { Alert } from 'antd';
 import { Link } from 'react-router-dom';
 import Sidebar from './Sidebar';
@@ -14,6 +14,8 @@ interface MainLayoutProps {
   onCloseLLMPromo: () => void;
 }
 
+const SIDEBAR_COLLAPSED_KEY = 'im_sidebar_collapsed';
+
 export default function MainLayout({
   children,
   user,
@@ -22,11 +24,28 @@ export default function MainLayout({
   showLlmPromo,
   onCloseLLMPromo,
 }: MainLayoutProps) {
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(
+    () => localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1'
+  );
+
+  const toggleSidebar = () => {
+    setSidebarCollapsed((prev) => {
+      localStorage.setItem(SIDEBAR_COLLAPSED_KEY, prev ? '0' : '1');
+      return !prev;
+    });
+  };
+
   return (
     <div className={styles.layoutContainer}>
-      <Sidebar user={user} onLogout={onLogout} llmConfigured={llmConfigured} />
+      <Sidebar
+        user={user}
+        onLogout={onLogout}
+        llmConfigured={llmConfigured}
+        collapsed={sidebarCollapsed}
+        onToggleCollapse={toggleSidebar}
+      />
 
-      <main className={styles.mainContent}>
+      <main className={`${styles.mainContent} ${sidebarCollapsed ? styles.mainContentCollapsed : ''}`}>
         <div className={styles.contentWrapper}>
           {/* LLM Configuration Promo Banner (admins only) */}
           {showLlmPromo && !llmConfigured && (

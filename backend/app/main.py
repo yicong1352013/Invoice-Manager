@@ -52,7 +52,43 @@ _SCHEMA_PATCHES = [
     "ALTER TABLE llm_providers ADD COLUMN IF NOT EXISTS api_mode VARCHAR(10) NOT NULL DEFAULT 'chat'",
     "ALTER TABLE llm_providers ADD COLUMN IF NOT EXISTS temperature DOUBLE PRECISION",
     "ALTER TABLE llm_providers ADD COLUMN IF NOT EXISTS max_output_tokens INTEGER",
+    # PG enum for InvoiceStatus. The model maps SQLEnum(InvoiceStatus) by
+    # python NAME (rows store "REVIEWING"; Chinese labels live at the JSON
+    # layer), so the new value is added as its name 'FAILED'. A stray
+    # '解析失败' label from an earlier wrong patch stays in the type — PG
+    # cannot drop enum values — but nothing ever binds it.
+    "ALTER TYPE invoicestatus ADD VALUE IF NOT EXISTS 'FAILED'",
 ]
+
+
+async def _recover_stuck_processing() -> None:
+    """Reset invoices stuck in 解析中 (server died mid-recognition).
+
+    Without this, a backend restart during processing leaves invoices in
+    解析中 forever. They become 解析失败 with an audit note so the reason is
+    visible on the logs page and 重新解析 retries them.
+    """
+    from sqlalchemy import select
+
+    from app.database import async_session_maker
+    from app.models.audit_log import AuditLog
+    from app.models.invoice import Invoice, InvoiceStatus
+
+    async with async_session_maker() as db:
+        result = await db.execute(select(Invoice).where(Invoice.status == InvoiceStatus.PROCESSING))
+        stuck = result.scalars().all()
+        for inv in stuck:
+            inv.status = InvoiceStatus.FAILED
+            db.add(AuditLog(
+                entity_type="invoice",
+                entity_id=inv.id,
+                action="process_failed",
+                new_value={"error": "服务重启导致识别中断", "interrupted": True},
+                details="识别失败: 服务重启导致识别中断，请重新解析",
+            ))
+        if stuck:
+            await db.commit()
+            print(f"[startup] reset {len(stuck)} stuck 解析中 invoice(s) to 解析失败")
 
 
 async def _startup_init() -> None:
@@ -65,16 +101,20 @@ async def _startup_init() -> None:
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        for ddl in _SCHEMA_PATCHES:
-            try:
+    # Each patch runs in its own transaction: a failing statement aborts its
+    # PG transaction, and a shared one would roll back the earlier patches.
+    for ddl in _SCHEMA_PATCHES:
+        try:
+            async with engine.begin() as conn:
                 await conn.execute(text(ddl))
-            except Exception as e:  # noqa: BLE001 - keep startup alive on patch failure
-                print(f"[startup] schema patch skipped ({ddl.split('ADD COLUMN ')[0]}...): {e}")
+        except Exception as e:  # noqa: BLE001 - keep startup alive on patch failure
+            print(f"[startup] schema patch skipped ({ddl.split('ADD COLUMN ')[0]}...): {e}")
     await _seed_admin()
     # Seed preset LLM providers + one-time legacy .env migration
     from app.services.provider_service import ensure_provider_seeded
     async with async_session_maker() as db:
         await ensure_provider_seeded(db)
+    await _recover_stuck_processing()
 
 
 @asynccontextmanager

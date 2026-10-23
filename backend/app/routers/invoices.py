@@ -217,17 +217,19 @@ async def process_invoice_background(invoice_id: int, max_retries: int = 3):
             invoice = result.scalar_one_or_none()
 
             if invoice:
-                # Set status back to UPLOADED so user can retry manually
-                invoice.status = InvoiceStatus.UPLOADED
+                # Mark as 解析失败 so the failure is visible; 重新解析 retries
+                invoice.status = InvoiceStatus.FAILED
                 await db.commit()
 
-                # Log failed processing
+                # Log failed processing with a human-readable reason
+                # (details drives the logs page 详情 column)
                 await log_audit(
                     db=db,
                     entity_type="invoice",
                     entity_id=invoice_id,
                     action="process_failed",
-                    new_value={"error": last_error, "attempts": max_retries + 1}
+                    new_value={"error": last_error, "attempts": max_retries + 1},
+                    details=f"识别失败: {str(last_error)[:300]}",
                 )
 
             logger.error(f"Invoice {invoice_id} processing failed after {max_retries + 1} attempts: {last_error}")

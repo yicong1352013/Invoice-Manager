@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Button, Input, Modal, Popconfirm, Select, Table, Tag, message } from 'antd';
+import { Button, Input, Modal, Popconfirm, Select, Table, Tag, Upload, message } from 'antd';
 import {
   DeleteOutlined, DownloadOutlined, EyeOutlined, FilePdfOutlined,
-  PaperClipOutlined, RedoOutlined, UploadOutlined,
+  InboxOutlined, PaperClipOutlined, RedoOutlined, UploadOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
@@ -85,8 +85,6 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
   const [lastNewInvoiceId, setLastNewInvoiceId] = useState<number | undefined>(undefined);
   const [uploading, setUploading] = useState(false);
   const [preview, setPreview] = useState<PreviewState | null>(null);
-  const invoiceInputRef = useRef<HTMLInputElement>(null);
-  const attachmentInputRef = useRef<HTMLInputElement>(null);
   const batchIdsRef = useRef<number[]>([]);
   const prevHadProcessingRef = useRef(false);
 
@@ -476,26 +474,22 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
       <div className={styles.section}>
         <div className={styles.sectionHeader}>
           <span className={styles.sectionLabel}>发票</span>
-          <Button
-            size="small"
-            icon={<UploadOutlined />}
-            onClick={() => invoiceInputRef.current?.click()}
-          >
-            上传文件
-          </Button>
-          <span className={styles.hint}>支持 Ctrl+V 粘贴截图 · 支持 jpg / jpeg / png / pdf，单文件不超过 10MB</span>
         </div>
-        <input
-          ref={invoiceInputRef}
-          type="file"
+        <Upload.Dragger
           multiple
           accept={INVOICE_EXTS.map((e) => `.${e}`).join(',')}
-          className={styles.hiddenInput}
-          onChange={(e) => {
-            addFiles(Array.from(e.target.files ?? []), INVOICE_EXTS, 'invoice');
-            e.target.value = '';
+          showUploadList={false}
+          beforeUpload={(file) => {
+            addFiles([file], INVOICE_EXTS, 'invoice');
+            return Upload.LIST_IGNORE;
           }}
-        />
+        >
+          <p className="ant-upload-drag-icon"><InboxOutlined /></p>
+          <p className="ant-upload-text">点击或拖拽发票文件到此处上传</p>
+          <p className="ant-upload-hint">
+            支持 jpg / jpeg / png / pdf 格式，单文件不超过 10MB，可批量选择；支持 Ctrl+V 直接粘贴截图
+          </p>
+        </Upload.Dragger>
         {invoiceFiles.map((p) =>
           renderFileRow(p.uid, p.file.name, p.file, null, () =>
             setInvoiceFiles((prev) => prev.filter((f) => f.uid !== p.uid))
@@ -535,28 +529,22 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
       <div className={styles.section} style={{ marginBottom: 0 }}>
         <div className={styles.sectionHeader}>
           <span className={styles.sectionLabel}>附件</span>
-          <Button
-            size="small"
-            icon={<UploadOutlined />}
-            onClick={() => attachmentInputRef.current?.click()}
-          >
-            上传文件
-          </Button>
-          <span className={styles.hint}>
-            支持 jpg / jpeg / png / pdf / doc / docx / xls / xlsx，可关联到本次或已有发票
-          </span>
         </div>
-        <input
-          ref={attachmentInputRef}
-          type="file"
+        <Upload.Dragger
           multiple
           accept={ATTACHMENT_EXTS.map((e) => `.${e}`).join(',')}
-          className={styles.hiddenInput}
-          onChange={(e) => {
-            addFiles(Array.from(e.target.files ?? []), ATTACHMENT_EXTS, 'attachment');
-            e.target.value = '';
+          showUploadList={false}
+          beforeUpload={(file) => {
+            addFiles([file], ATTACHMENT_EXTS, 'attachment');
+            return Upload.LIST_IGNORE;
           }}
-        />
+        >
+          <p className="ant-upload-drag-icon"><InboxOutlined /></p>
+          <p className="ant-upload-text">点击或拖拽附件文件到此处上传</p>
+          <p className="ant-upload-hint">
+            支持 jpg / jpeg / png / pdf / doc / docx / xls / xlsx 格式，可关联到本次或已有发票并填写备注
+          </p>
+        </Upload.Dragger>
         {attachmentRows.map((row) =>
           renderFileRow(
             row.uid,
