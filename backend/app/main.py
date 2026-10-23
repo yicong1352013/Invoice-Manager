@@ -45,8 +45,18 @@ async def _seed_admin() -> None:
         await db.commit()
 
 
+# Idempotent column patches for tables created before these fields existed.
+# create_all only creates NEW tables; ALTER ... IF NOT EXISTS upgrades old ones.
+_SCHEMA_PATCHES = [
+    "ALTER TABLE llm_providers ADD COLUMN IF NOT EXISTS api_mode VARCHAR(10) NOT NULL DEFAULT 'chat'",
+    "ALTER TABLE llm_providers ADD COLUMN IF NOT EXISTS temperature DOUBLE PRECISION",
+    "ALTER TABLE llm_providers ADD COLUMN IF NOT EXISTS max_output_tokens INTEGER",
+]
+
+
 async def _startup_init() -> None:
-    """Create tables (new ones only) and seed initial data."""
+    """Create tables (new ones only), patch existing tables, and seed data."""
+    from sqlalchemy import text
     from app.database import Base, async_session_maker, engine
     from app.models.attachment import Attachment  # noqa: F401
     from app.models.provider import AppSetting, LlmProvider  # noqa: F401
@@ -54,6 +64,11 @@ async def _startup_init() -> None:
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        for ddl in _SCHEMA_PATCHES:
+            try:
+                await conn.execute(text(ddl))
+            except Exception as e:  # noqa: BLE001 - keep startup alive on patch failure
+                print(f"[startup] schema patch skipped ({ddl.split('ADD COLUMN ')[0]}...): {e}")
     await _seed_admin()
     # Seed preset LLM providers + one-time legacy .env migration
     from app.services.provider_service import ensure_provider_seeded

@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, Enum as SQLEnum
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, Float, Text, Enum as SQLEnum
 
 from app.database import Base
 
@@ -26,6 +26,11 @@ class LlmProvider(Base):
     api_key = Column(String(500), nullable=True)
     model = Column(String(200), nullable=True)
     vision = Column(Boolean, default=False, nullable=False)  # declared image-input capability
+    # For openai_compatible endpoints: 'chat' (Chat Completions) or
+    # 'responses' (Responses API, e.g. DeepSeek POST /responses)
+    api_mode = Column(String(10), default="chat", nullable=False)
+    temperature = Column(Float, nullable=True)  # None = provider default
+    max_output_tokens = Column(Integer, nullable=True)  # None = client default
     is_preset = Column(Boolean, default=False, nullable=False)
     enabled = Column(Boolean, default=True, nullable=False)
     sort_order = Column(Integer, default=0, nullable=False)

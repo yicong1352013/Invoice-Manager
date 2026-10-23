@@ -50,6 +50,45 @@ def _get_max_tokens_param(model_name: str, value: int) -> dict:
     return {"max_tokens": value}
 
 
+def extract_responses_text(response: Any) -> str:
+    """Extract assistant text from a Responses API response.
+
+    Works with the SDK object (output_text aggregate or output[].content[]
+    walk) and with plain dicts in unit tests. Returns concatenated
+    output_text parts.
+    """
+    convenience = getattr(response, "output_text", None)
+    if convenience is None and isinstance(response, dict):
+        convenience = response.get("output_text")
+    if convenience:
+        return convenience.strip()
+
+    output = getattr(response, "output", None)
+    if output is None and isinstance(response, dict):
+        output = response.get("output") or []
+    parts: list[str] = []
+    for item in output or []:
+        item_type = getattr(item, "type", None)
+        if item_type is None and isinstance(item, dict):
+            item_type = item.get("type")
+        if item_type != "message":
+            continue
+        content = getattr(item, "content", None)
+        if content is None and isinstance(item, dict):
+            content = item.get("content") or []
+        for block in content or []:
+            block_type = getattr(block, "type", None)
+            if block_type is None and isinstance(block, dict):
+                block_type = block.get("type")
+            if block_type == "output_text":
+                text = getattr(block, "text", None)
+                if text is None and isinstance(block, dict):
+                    text = block.get("text")
+                if text:
+                    parts.append(text)
+    return "".join(parts).strip()
+
+
 class BaseLLMClient(ABC):
     """A single configured LLM endpoint."""
 
@@ -57,13 +96,32 @@ class BaseLLMClient(ABC):
     # the provider row does not declare vision capability)
     VISION_PATTERNS: list[str] = []
 
-    def __init__(self, model: str, api_key: str, base_url: Optional[str], declared_vision: bool):
+    def __init__(
+        self,
+        model: str,
+        api_key: str,
+        base_url: Optional[str],
+        declared_vision: bool,
+        temperature: Optional[float] = None,
+        max_output_tokens: Optional[int] = None,
+        api_mode: str = "chat",
+    ):
         self.model = model
         self.api_key = api_key
         self.base_url = base_url
         self.declared_vision = declared_vision
+        self.temperature = temperature
+        self.max_output_tokens = max_output_tokens
+        self.api_mode = api_mode
         self._client: Any = None
         self._lock = threading.Lock()
+
+    def _generation_params(self, default_temperature: float, default_max_tokens: int) -> dict:
+        """Generation kwargs honoring provider-configured overrides."""
+        params: dict = {"temperature": self.temperature if self.temperature is not None else default_temperature}
+        max_tokens = self.max_output_tokens if self.max_output_tokens is not None else default_max_tokens
+        params.update(_get_max_tokens_param(self.model, max_tokens))
+        return params
 
     def _ensure_client(self):
         if self._client is None:
@@ -96,7 +154,11 @@ class BaseLLMClient(ABC):
 
 
 class OpenAICompatibleClient(BaseLLMClient):
-    """OpenAI Chat Completions protocol — also DeepSeek, GLM, Qwen, proxies."""
+    """OpenAI-compatible endpoint: Chat Completions or Responses API.
+
+    api_mode 'chat' (default) covers OpenAI and most proxies (DeepSeek/GLM/
+    Qwen); 'responses' targets the Responses API (e.g. DeepSeek /responses).
+    """
 
     VISION_PATTERNS = ["gpt-4o", "gpt-4-turbo", "gpt-4-vision", "gpt-5", "o1", "o3",
                        "qwen-vl", "qwen2-vl", "qwen2.5-vl", "glm-4v", "deepseek-vl",
@@ -115,20 +177,52 @@ class OpenAICompatibleClient(BaseLLMClient):
     def get_protocol_name(self) -> str:
         return "openai_compatible"
 
+    def _responses_params(self) -> dict:
+        """Responses API kwargs (max_output_tokens is the native param there)."""
+        params: dict = {}
+        if self.temperature is not None:
+            params["temperature"] = self.temperature
+        if self.max_output_tokens is not None:
+            params["max_output_tokens"] = self.max_output_tokens
+        return params
+
     def chat_completion(self, system_prompt: str, user_prompt: str) -> str:
+        if self.api_mode == "responses":
+            response = self._ensure_client().responses.create(
+                model=self.model,
+                instructions=system_prompt,
+                input=[{"role": "user", "content": [{"type": "input_text", "text": user_prompt}]}],
+                **self._responses_params(),
+            )
+            return extract_responses_text(response)
+
         response = self._ensure_client().chat.completions.create(
             model=self.model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.1,
-            **_get_max_tokens_param(self.model, 2000),
+            **self._generation_params(default_temperature=0.1, default_max_tokens=2000),
         )
         return response.choices[0].message.content.strip()
 
     def vision_completion(self, system_prompt: str, user_prompt: str, image_data: bytes, mime_type: str = "image/png") -> str:
         base64_image = base64.b64encode(image_data).decode("utf-8")
+        if self.api_mode == "responses":
+            response = self._ensure_client().responses.create(
+                model=self.model,
+                instructions=system_prompt,
+                input=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": user_prompt},
+                        {"type": "input_image", "image_url": f"data:{mime_type};base64,{base64_image}"},
+                    ],
+                }],
+                **self._responses_params(),
+            )
+            return extract_responses_text(response)
+
         response = self._ensure_client().chat.completions.create(
             model=self.model,
             messages=[
@@ -144,8 +238,7 @@ class OpenAICompatibleClient(BaseLLMClient):
                     ]
                 }
             ],
-            temperature=0.1,
-            **_get_max_tokens_param(self.model, 2000),
+            **self._generation_params(default_temperature=0.1, default_max_tokens=2000),
         )
         return response.choices[0].message.content.strip()
 
@@ -165,12 +258,18 @@ class AnthropicCompatibleClient(BaseLLMClient):
     def get_protocol_name(self) -> str:
         return "anthropic_compatible"
 
+    def _messages_params(self) -> dict:
+        params: dict = {"max_tokens": self.max_output_tokens if self.max_output_tokens is not None else 2000}
+        if self.temperature is not None:
+            params["temperature"] = self.temperature
+        return params
+
     def chat_completion(self, system_prompt: str, user_prompt: str) -> str:
         response = self._ensure_client().messages.create(
             model=self.model,
-            max_tokens=2000,
             system=system_prompt,
             messages=[{"role": "user", "content": user_prompt}],
+            **self._messages_params(),
         )
         return response.content[0].text.strip()
 
@@ -178,7 +277,6 @@ class AnthropicCompatibleClient(BaseLLMClient):
         base64_image = base64.b64encode(image_data).decode("utf-8")
         response = self._ensure_client().messages.create(
             model=self.model,
-            max_tokens=2000,
             system=system_prompt,
             messages=[
                 {
@@ -196,6 +294,7 @@ class AnthropicCompatibleClient(BaseLLMClient):
                     ]
                 }
             ],
+            **self._messages_params(),
         )
         return response.content[0].text.strip()
 
@@ -228,9 +327,17 @@ class GoogleClient(BaseLLMClient):
     def get_protocol_name(self) -> str:
         return "google"
 
+    def _generate_kwargs(self) -> dict:
+        generation_config: dict = {}
+        if self.temperature is not None:
+            generation_config["temperature"] = self.temperature
+        if self.max_output_tokens is not None:
+            generation_config["max_output_tokens"] = self.max_output_tokens
+        return {"generation_config": generation_config} if generation_config else {}
+
     def chat_completion(self, system_prompt: str, user_prompt: str) -> str:
         full_prompt = f"{system_prompt}\n\n{user_prompt}"
-        response = self._ensure_client().generate_content(full_prompt)
+        response = self._ensure_client().generate_content(full_prompt, **self._generate_kwargs())
         return response.text.strip()
 
     def vision_completion(self, system_prompt: str, user_prompt: str, image_data: bytes, mime_type: str = "image/png") -> str:
@@ -239,7 +346,7 @@ class GoogleClient(BaseLLMClient):
 
         image = Image.open(BytesIO(image_data))
         full_prompt = f"{system_prompt}\n\n{user_prompt}"
-        response = self._ensure_client().generate_content([full_prompt, image])
+        response = self._ensure_client().generate_content([full_prompt, image], **self._generate_kwargs())
         return response.text.strip()
 
 
@@ -264,6 +371,9 @@ def build_client(row: Optional[LlmProvider]) -> Optional[BaseLLMClient]:
         api_key=row.api_key,
         base_url=row.base_url or None,
         declared_vision=bool(row.vision),
+        temperature=getattr(row, "temperature", None),
+        max_output_tokens=getattr(row, "max_output_tokens", None),
+        api_mode=getattr(row, "api_mode", None) or "chat",
     )
 
 

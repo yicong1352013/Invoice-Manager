@@ -71,6 +71,9 @@ class ProviderOut(BaseModel):
     base_url: Optional[str] = None
     model: Optional[str] = None
     vision: bool
+    api_mode: str = "chat"
+    temperature: Optional[float] = None
+    max_output_tokens: Optional[int] = None
     is_preset: bool
     enabled: bool
     api_key_masked: Optional[str] = None
@@ -85,6 +88,9 @@ class ProviderCreateRequest(BaseModel):
     api_key: Optional[str] = Field(default=None, max_length=500)
     model: Optional[str] = Field(default=None, max_length=200)
     vision: bool = False
+    api_mode: str = Field(default="chat", pattern=r"^(chat|responses)$")
+    temperature: Optional[float] = Field(default=None, ge=0, le=2)
+    max_output_tokens: Optional[int] = Field(default=None, ge=1)
 
 
 class ProviderUpdateRequest(BaseModel):
@@ -94,6 +100,9 @@ class ProviderUpdateRequest(BaseModel):
     model: Optional[str] = None
     vision: Optional[bool] = None
     enabled: Optional[bool] = None
+    api_mode: Optional[str] = Field(default=None, pattern=r"^(chat|responses)$")
+    temperature: Optional[float] = Field(default=None, ge=0, le=2)
+    max_output_tokens: Optional[int] = Field(default=None, ge=1)
 
 
 class ProviderTestRequest(BaseModel):
@@ -101,6 +110,9 @@ class ProviderTestRequest(BaseModel):
     api_key: str = Field(min_length=1)
     model: str
     base_url: Optional[str] = None
+    api_mode: str = Field(default="chat", pattern=r"^(chat|responses)$")
+    temperature: Optional[float] = Field(default=None, ge=0, le=2)
+    max_output_tokens: Optional[int] = Field(default=None, ge=1)
 
 
 class ProviderTestResponse(BaseModel):
@@ -190,6 +202,9 @@ async def create_provider(
         api_key=(body.api_key or "").strip() or None,
         model=(body.model or "").strip() or None,
         vision=body.vision,
+        api_mode=body.api_mode,
+        temperature=body.temperature,
+        max_output_tokens=body.max_output_tokens,
         is_preset=False,
         enabled=True,
         sort_order=100,
@@ -224,6 +239,14 @@ async def update_provider(
         row.vision = body.vision
     if body.enabled is not None:
         row.enabled = body.enabled
+    # Numeric overrides use model_fields_set so an explicit null clears the
+    # value while an absent field keeps it.
+    if body.api_mode is not None:
+        row.api_mode = body.api_mode
+    if "temperature" in body.model_fields_set:
+        row.temperature = body.temperature
+    if "max_output_tokens" in body.model_fields_set:
+        row.max_output_tokens = body.max_output_tokens
 
     await db.commit()
     await db.refresh(row)
@@ -297,6 +320,9 @@ async def test_provider_config(
         api_key=body.api_key.strip(),
         base_url=base_url,
         declared_vision=True,
+        temperature=body.temperature,
+        max_output_tokens=body.max_output_tokens,
+        api_mode=body.api_mode,
     )
 
     start = time.monotonic()
@@ -351,9 +377,85 @@ async def test_saved_provider(
             api_key=row.api_key,
             model=row.model,
             base_url=row.base_url,
+            api_mode=getattr(row, "api_mode", None) or "chat",
+            temperature=getattr(row, "temperature", None),
+            max_output_tokens=getattr(row, "max_output_tokens", None),
         ),
         _admin=_admin,
     )
+
+
+# --- Fetch live model list from the provider (admin) --------------------------
+
+
+class FetchModelsResponse(BaseModel):
+    models: List[str]
+    message: Optional[str] = None
+
+
+async def _fetch_models_openai_compatible(base_url: str, api_key: str) -> List[str]:
+    import httpx
+
+    headers = {"Authorization": f"Bearer {api_key}"}
+    async with httpx.AsyncClient(timeout=15.0) as http:
+        resp = await http.get(f"{base_url}/models", headers=headers)
+        if resp.status_code == 404 and not base_url.endswith("/v1"):
+            # Some deployments expose the endpoint under /v1 only
+            resp = await http.get(f"{base_url}/v1/models", headers=headers)
+        resp.raise_for_status()
+        data = resp.json().get("data") or []
+    return [m["id"] for m in data if isinstance(m, dict) and m.get("id")]
+
+
+async def _fetch_models_anthropic(base_url: str, api_key: str) -> List[str]:
+    import httpx
+
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+    }
+    async with httpx.AsyncClient(timeout=15.0) as http:
+        resp = await http.get(f"{base_url}/v1/models", headers=headers)
+        resp.raise_for_status()
+        data = resp.json().get("data") or []
+    return [m["id"] for m in data if isinstance(m, dict) and m.get("id")]
+
+
+@router.post("/providers/{provider_id}/fetch-models", response_model=FetchModelsResponse)
+async def fetch_provider_models(
+    provider_id: int,
+    _admin: User = Depends(require_settings_write),
+    db: AsyncSession = Depends(get_db),
+):
+    """Fetch the live model list from the provider's /models endpoint."""
+    row = await db.get(LlmProvider, provider_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="供应商不存在")
+    if not row.api_key:
+        raise HTTPException(status_code=400, detail="请先填写该供应商的 API Key")
+
+    base = (row.base_url or "").strip().rstrip("/")
+    try:
+        if row.protocol == ProviderProtocol.OPENAI_COMPATIBLE:
+            models = await _fetch_models_openai_compatible(
+                base or "https://api.openai.com/v1", row.api_key
+            )
+        elif row.protocol == ProviderProtocol.ANTHROPIC_COMPATIBLE:
+            models = await _fetch_models_anthropic(
+                base or "https://api.anthropic.com", row.api_key
+            )
+        else:
+            return FetchModelsResponse(
+                models=[],
+                message="Google Gemini 暂不支持拉取模型列表，请手动填写模型名",
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Fetch models failed for provider {row.name}: {e}")
+        raise HTTPException(status_code=502, detail=f"拉取模型列表失败: {str(e)[:200]}")
+
+    return FetchModelsResponse(models=models)
 
 
 # --- Model catalog (any authenticated user) ----------------------------------

@@ -1,17 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  Button, Card, Form, Input, Modal, Popconfirm, Radio, Space, Switch,
-  Table, Tag, message,
+  AutoComplete, Button, Card, Form, Input, InputNumber, Modal, Popconfirm,
+  Radio, Space, Switch, Table, Tag, message,
 } from 'antd';
 import {
-  DeleteOutlined, EditOutlined, PlayCircleOutlined, PlusOutlined,
-  ReloadOutlined, ThunderboltOutlined,
+  CloudDownloadOutlined, DeleteOutlined, EditOutlined, PlayCircleOutlined,
+  PlusOutlined, ReloadOutlined, ThunderboltOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import {
-  activateProvider, createProvider, deleteProvider, getAppSettings,
-  getLLMStatus, listProviders, testSavedProvider, updateAppSettings,
-  updateProvider,
+  activateProvider, createProvider, deleteProvider, fetchProviderModels,
+  getAppSettings, getLLMStatus, listProviders, testSavedProvider,
+  updateAppSettings, updateProvider,
 } from '../services/api';
 import type {
   AppSettings, LlmProvider, ProviderProtocol,
@@ -34,6 +34,9 @@ interface ProviderFormValues {
   model?: string;
   vision: boolean;
   enabled: boolean;
+  api_mode?: string;
+  temperature?: number | null;
+  max_output_tokens?: number | null;
 }
 
 interface CreateFormValues extends ProviderFormValues {
@@ -54,6 +57,9 @@ export default function SettingsPage({ currentUser }: SettingsPageProps) {
   const [testingId, setTestingId] = useState<number | null>(null);
   const [createForm] = Form.useForm<CreateFormValues>();
   const [editForm] = Form.useForm<ProviderFormValues>();
+  const [modelOptions, setModelOptions] = useState<{ value: string }[]>([]);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const createProtocol = Form.useWatch('protocol', createForm);
 
   const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
   const [settingsSaving, setSettingsSaving] = useState(false);
@@ -141,8 +147,33 @@ export default function SettingsPage({ currentUser }: SettingsPageProps) {
     }
   };
 
+  const handleFetchModels = async () => {
+    if (!editing) return;
+    if (!editing.has_api_key) {
+      message.warning('请先填写该供应商的 API Key 并保存');
+      return;
+    }
+    setFetchingModels(true);
+    try {
+      const result = await fetchProviderModels(editing.id);
+      if (result.message) {
+        message.info(result.message);
+      }
+      if (result.models.length > 0) {
+        setModelOptions(result.models.map((m) => ({ value: m })));
+        message.success(`已拉取 ${result.models.length} 个模型`);
+      }
+    } catch (error: unknown) {
+      const detail = (error as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      message.error(detail || '拉取模型列表失败');
+    } finally {
+      setFetchingModels(false);
+    }
+  };
+
   const openEdit = (provider: LlmProvider) => {
     setEditing(provider);
+    setModelOptions(provider.model ? [{ value: provider.model }] : []);
     editForm.setFieldsValue({
       display_name: provider.display_name,
       protocol: provider.protocol,
@@ -151,6 +182,9 @@ export default function SettingsPage({ currentUser }: SettingsPageProps) {
       model: provider.model ?? '',
       vision: provider.vision,
       enabled: provider.enabled,
+      api_mode: provider.api_mode || 'chat',
+      temperature: provider.temperature,
+      max_output_tokens: provider.max_output_tokens,
     });
   };
 
@@ -165,6 +199,10 @@ export default function SettingsPage({ currentUser }: SettingsPageProps) {
         model: values.model ?? '',
         vision: values.vision,
         enabled: values.enabled,
+        api_mode: values.api_mode || 'chat',
+        // explicit null clears the override (backend distinguishes null vs absent)
+        temperature: values.temperature ?? null,
+        max_output_tokens: values.max_output_tokens ?? null,
       });
       message.success('已保存');
       setEditing(null);
@@ -246,7 +284,14 @@ export default function SettingsPage({ currentUser }: SettingsPageProps) {
       dataIndex: 'protocol',
       key: 'protocol',
       width: 140,
-      render: (val: ProviderProtocol) => PROTOCOL_LABELS[val] ?? val,
+      render: (val: ProviderProtocol, record) => (
+        <Space size={4}>
+          <span>{PROTOCOL_LABELS[val] ?? val}</span>
+          {val === 'openai_compatible' && record.api_mode === 'responses' && (
+            <Tag style={{ marginInlineEnd: 0 }}>Responses</Tag>
+          )}
+        </Space>
+      ),
     },
     {
       title: '模型',
@@ -417,7 +462,7 @@ export default function SettingsPage({ currentUser }: SettingsPageProps) {
         okText="添加"
         cancelText="取消"
       >
-        <Form form={createForm} layout="vertical" onFinish={handleCreate} initialValues={{ protocol: 'openai_compatible', vision: true, enabled: true }}>
+        <Form form={createForm} layout="vertical" onFinish={handleCreate} initialValues={{ protocol: 'openai_compatible', vision: true, enabled: true, api_mode: 'chat' }}>
           <Form.Item
             name="name"
             label="标识（小写字母/数字/中划线）"
@@ -438,6 +483,14 @@ export default function SettingsPage({ currentUser }: SettingsPageProps) {
               <Radio value="google">Google Gemini</Radio>
             </Radio.Group>
           </Form.Item>
+          {createProtocol === 'openai_compatible' && (
+            <Form.Item name="api_mode" label="接口模式" rules={[{ required: true }]}>
+              <Radio.Group>
+                <Radio value="chat">Chat Completions（/chat/completions）</Radio>
+                <Radio value="responses">Responses API（/responses）</Radio>
+              </Radio.Group>
+            </Form.Item>
+          )}
           <Form.Item name="base_url" label="API 地址 (base_url)">
             <Input placeholder="如 https://openrouter.ai/api/v1（OpenAI 官方可留空）" />
           </Form.Item>
@@ -445,8 +498,25 @@ export default function SettingsPage({ currentUser }: SettingsPageProps) {
             <Input.Password placeholder="sk-..." autoComplete="new-password" />
           </Form.Item>
           <Form.Item name="model" label="模型名称" rules={[{ required: true, message: '请输入模型名称' }]}>
-            <Input placeholder="如 gpt-4o / glm-4v-flash / qwen-vl-plus" />
+            <AutoComplete
+              placeholder="如 gpt-4o / glm-4v-flash / qwen-vl-plus"
+              options={modelOptions}
+              filterOption={(input, option) =>
+                (option?.value ?? '').toLowerCase().includes(input.toLowerCase())}
+            />
           </Form.Item>
+          <Space size={24}>
+            <Form.Item
+              name="temperature"
+              label="temperature（0-2，留空默认）"
+              rules={[{ type: 'number', min: 0, max: 2, message: '范围 0-2' }]}
+            >
+              <InputNumber placeholder="默认" style={{ width: 140 }} />
+            </Form.Item>
+            <Form.Item name="max_output_tokens" label="max_output_tokens（留空默认）">
+              <InputNumber placeholder="默认" min={1} style={{ width: 160 }} />
+            </Form.Item>
+          </Space>
           <Form.Item name="vision" label="该模型支持图片输入（视觉）" valuePropName="checked">
             <Switch />
           </Form.Item>
@@ -470,6 +540,14 @@ export default function SettingsPage({ currentUser }: SettingsPageProps) {
           <Form.Item label="协议">
             <Input disabled value={editing ? PROTOCOL_LABELS[editing.protocol] : ''} />
           </Form.Item>
+          {editing?.protocol === 'openai_compatible' && (
+            <Form.Item name="api_mode" label="接口模式" rules={[{ required: true }]}>
+              <Radio.Group>
+                <Radio value="chat">Chat Completions（/chat/completions）</Radio>
+                <Radio value="responses">Responses API（/responses）</Radio>
+              </Radio.Group>
+            </Form.Item>
+          )}
           <Form.Item name="base_url" label="API 地址 (base_url)">
             <Input placeholder="留空使用协议默认地址" />
           </Form.Item>
@@ -479,9 +557,38 @@ export default function SettingsPage({ currentUser }: SettingsPageProps) {
           >
             <Input.Password placeholder="sk-..." autoComplete="new-password" />
           </Form.Item>
-          <Form.Item name="model" label="模型名称" rules={[{ required: true }]}>
-            <Input />
+          <Form.Item label="模型名称" required>
+            <Space.Compact style={{ width: '100%' }}>
+              <Form.Item name="model" noStyle rules={[{ required: true, message: '请输入模型名称' }]}>
+                <AutoComplete
+                  placeholder="输入或从拉取列表选择"
+                  options={modelOptions}
+                  filterOption={(input, option) =>
+                    (option?.value ?? '').toLowerCase().includes(input.toLowerCase())}
+                />
+              </Form.Item>
+              <Button
+                icon={<CloudDownloadOutlined />}
+                loading={fetchingModels}
+                onClick={handleFetchModels}
+                disabled={!editing}
+              >
+                拉取模型
+              </Button>
+            </Space.Compact>
           </Form.Item>
+          <Space size={24}>
+            <Form.Item
+              name="temperature"
+              label="temperature（0-2，留空默认）"
+              rules={[{ type: 'number', min: 0, max: 2, message: '范围 0-2' }]}
+            >
+              <InputNumber placeholder="默认" style={{ width: 140 }} />
+            </Form.Item>
+            <Form.Item name="max_output_tokens" label="max_output_tokens（留空默认）">
+              <InputNumber placeholder="默认" min={1} style={{ width: 160 }} />
+            </Form.Item>
+          </Space>
           <Space size={24}>
             <Form.Item name="vision" label="支持图片输入（视觉）" valuePropName="checked">
               <Switch />

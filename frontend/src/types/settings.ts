@@ -8,6 +8,9 @@ export interface LlmProvider {
   base_url: string | null;
   model: string | null;
   vision: boolean;
+  api_mode: string; // 'chat' | 'responses' (openai_compatible only)
+  temperature: number | null;
+  max_output_tokens: number | null;
   is_preset: boolean;
   enabled: boolean;
   api_key_masked: string | null;
@@ -22,6 +25,9 @@ export interface LlmProviderCreateRequest {
   api_key?: string;
   model?: string;
   vision: boolean;
+  api_mode?: string;
+  temperature?: number | null;
+  max_output_tokens?: number | null;
 }
 
 export interface LlmProviderUpdateRequest {
@@ -31,6 +37,9 @@ export interface LlmProviderUpdateRequest {
   model?: string;
   vision?: boolean;
   enabled?: boolean;
+  api_mode?: string;
+  temperature?: number | null;
+  max_output_tokens?: number | null;
 }
 
 export interface ProviderTestResponse {

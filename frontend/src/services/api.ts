@@ -318,6 +318,17 @@ export const testSavedProvider = async (id: number): Promise<ProviderTestRespons
   return response.data;
 };
 
+export interface FetchModelsResponse {
+  models: string[];
+  message?: string | null;
+}
+
+// Pull the live model list from the provider's /models endpoint
+export const fetchProviderModels = async (id: number): Promise<FetchModelsResponse> => {
+  const response = await api.post(`/settings/providers/${id}/fetch-models`);
+  return response.data;
+};
+
 // App settings (OCR engine, MCP)
 export const getAppSettings = async (): Promise<AppSettings> => {
   const response = await api.get('/settings/app-settings');
