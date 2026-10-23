@@ -20,6 +20,7 @@ import type { User, LoginResponse, UserCreateRequest, UserUpdateRequest } from '
 import type {
   Attachment, AttachmentCategory, AttachmentUploadResult,
 } from '../types/attachment';
+import type { AuditLogListResponse, LogListParams } from '../types/log';
 
 const TOKEN_KEY = 'im_token';
 
@@ -315,6 +316,17 @@ export const activateProvider = async (id: number): Promise<LlmProvider> => {
 
 export const testSavedProvider = async (id: number): Promise<ProviderTestResponse> => {
   const response = await api.post(`/settings/providers/${id}/test`);
+  return response.data;
+};
+
+// System logs (admin)
+export const getLogs = async (params: LogListParams = {}): Promise<AuditLogListResponse> => {
+  const response = await api.get('/logs', { params });
+  return response.data;
+};
+
+export const getLogActions = async (): Promise<string[]> => {
+  const response = await api.get('/logs/actions');
   return response.data;
 };
 

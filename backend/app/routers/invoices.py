@@ -1,6 +1,7 @@
 from typing import Optional, List
 from io import BytesIO
 from datetime import date
+import logging
 from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException, Query, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,8 +20,10 @@ from app.schemas.invoice import (
     ResolveDiffRequest
 )
 from app.config import get_settings
-from app.services.audit_service import log_audit_no_commit, get_client_info
+from app.services.audit_service import log_audit, log_audit_no_commit, get_client_info
 from app.rate_limit import limiter
+
+logger = logging.getLogger(__name__)
 
 settings = get_settings()
 router = APIRouter()
@@ -328,10 +331,11 @@ async def get_statistics(
 async def print_merge_invoices(
     request: Request,
     invoice_ids: str = Query(..., description="要打印的发票ID列表，逗号分隔"),
+    include_attachments: bool = Query(True, description="是否在每张发票原件后并入其 PDF/图片附件"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """将选中发票的原始文件合并为一个 PDF（浏览器内直接打印）"""
+    """将选中发票的原始文件（可含附件）合并为一个 PDF（浏览器内直接打印）"""
     from urllib.parse import quote
 
     from app.services.export_service import merge_original_files
@@ -347,10 +351,43 @@ async def print_merge_invoices(
     if not invoices:
         raise HTTPException(status_code=404, detail="未找到可打印的发票")
 
+    # Collect printable attachments per invoice; Office documents cannot be
+    # converted to PDF server-side, so they are skipped and noted.
+    printable: dict = {}
+    skipped_attachments = 0
+    if include_attachments:
+        att_result = await db.execute(
+            select(Attachment)
+            .where(Attachment.invoice_id.in_([inv.id for inv in invoices]))
+            .order_by(Attachment.id)
+        )
+        for att in att_result.scalars().all():
+            if att.file_type in ("pdf", "jpg", "jpeg", "png"):
+                printable.setdefault(att.invoice_id, []).append(att)
+            else:
+                skipped_attachments += 1
+                logger.info(
+                    f"print-merge skipped non-printable attachment "
+                    f"{att.file_name} ({att.file_type}) on invoice {att.invoice_id}"
+                )
+
+    files: list = [(inv.file_type, inv.file_data) for inv in invoices]
+    for inv in invoices:
+        for att in printable.get(inv.id, []):
+            files.append((att.file_type, att.file_data))
+
     try:
-        pdf_bytes = merge_original_files([(inv.file_type, inv.file_data) for inv in invoices])
+        pdf_bytes = merge_original_files(files)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    await _log_batch_action(
+        db, request, current_user, "print", invoices,
+        extra={
+            "include_attachments": include_attachments,
+            "skipped_attachments": skipped_attachments,
+        },
+    )
 
     filename = quote('发票打印.pdf')
     return StreamingResponse(
@@ -1186,6 +1223,7 @@ async def export_invoices_csv(
 
     output.seek(0)
 
+    await _log_batch_action(db, request, current_user, "export_csv", invoices)
     filename = quote('发票导出.csv')
     return StreamingResponse(
         output,
@@ -1321,6 +1359,7 @@ async def export_invoices_excel(
     wb.save(output)
     output.seek(0)
 
+    await _log_batch_action(db, request, current_user, "export_excel", invoices)
     filename = quote('发票导出.xlsx')
     return StreamingResponse(
         output,
@@ -1359,6 +1398,32 @@ def _build_export_query(
     return query.order_by(Invoice.created_at.desc())
 
 
+async def _log_batch_action(
+    db: AsyncSession,
+    request: Request,
+    current_user: User,
+    action: str,
+    invoices: List[Invoice],
+    extra: Optional[dict] = None,
+) -> None:
+    """Record an export/print action in the audit log (entity_id=0: batch)."""
+    client_info = get_client_info(request)
+    new_value = {"invoice_ids": [inv.id for inv in invoices], "count": len(invoices)}
+    if extra:
+        new_value.update(extra)
+    await log_audit(
+        db=db,
+        entity_type="invoice",
+        entity_id=0,
+        action=action,
+        user_id=current_user.username,
+        new_value=new_value,
+        ip_address=client_info.get("ip_address"),
+        user_agent=client_info.get("user_agent"),
+        details=f"{action}: {len(invoices)} 张发票",
+    )
+
+
 @router.get("/export/word")
 @limiter.limit("10/minute")
 async def export_invoices_word(
@@ -1381,6 +1446,8 @@ async def export_invoices_word(
     totals = compute_totals(invoices)
 
     output = build_word_export(invoices, totals)
+
+    await _log_batch_action(db, request, current_user, "export_word", invoices)
     filename = quote('发票导出.docx')
     return StreamingResponse(
         output,
@@ -1413,6 +1480,8 @@ async def export_invoices_pdf(
     totals = compute_totals(invoices)
 
     output = build_pdf_export(invoices, totals)
+
+    await _log_batch_action(db, request, current_user, "export_pdf", invoices)
     filename = quote('发票导出.pdf')
     return StreamingResponse(
         output,

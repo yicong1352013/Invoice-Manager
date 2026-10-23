@@ -19,8 +19,13 @@ export default function Sidebar({ user, onLogout, llmConfigured }: SidebarProps)
 
   const navItems = [
     { path: '/', label: '发票列表' },
-    
-    ...(user.role === 'admin' ? [{ path: '/settings', label: '设置' }] : []),
+
+    ...(user.role === 'admin'
+      ? [
+          { path: '/logs', label: '系统日志' },
+          { path: '/settings', label: '设置' },
+        ]
+      : []),
   ];
 
   return (

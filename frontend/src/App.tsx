@@ -4,6 +4,7 @@ import InvoiceListPage from './pages/InvoiceListPage';
 import InvoiceDetailPage from './pages/InvoiceDetailPage';
 import LoginPage from './pages/LoginPage';
 import SettingsPage from './pages/SettingsPage';
+import LogsPage from './pages/LogsPage';
 import { MainLayout } from './components/layout';
 import { getLLMStatus, getToken, clearToken, getCurrentUser } from './services/api';
 import type { User } from './types/user';
@@ -93,6 +94,10 @@ function AppContent() {
         <Route
           path="/settings"
           element={user.role === 'admin' ? <SettingsPage currentUser={user} /> : <Navigate to="/" replace />}
+        />
+        <Route
+          path="/logs"
+          element={user.role === 'admin' ? <LogsPage /> : <Navigate to="/" replace />}
         />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

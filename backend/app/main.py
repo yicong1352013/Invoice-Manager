@@ -11,6 +11,7 @@ from app.routers import (
     auth as auth_router,
     health,
     invoices,
+    logs as logs_router,
     settings as settings_router,
     users as users_router,
 )
@@ -126,6 +127,7 @@ app.include_router(users_router.router, prefix="/api/users", tags=["Users"])
 app.include_router(invoices.router, prefix="/api/invoices", tags=["Invoices"])
 app.include_router(attachments_router.router, prefix="/api/attachments", tags=["Attachments"])
 app.include_router(settings_router.router, prefix="/api/settings", tags=["Settings"])
+app.include_router(logs_router.router, prefix="/api/logs", tags=["Logs"])
 
 # MCP endpoint (streamable HTTP, gated on mcp_enabled + token in settings).
 # Mounted at /api with internal path /mcp => agents connect to /api/mcp.
