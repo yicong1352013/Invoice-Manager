@@ -260,9 +260,12 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
         setInvoiceFiles([]);
       }
 
-      // 2) attachments — one request per file so each keeps its own note
+      // 2) attachments — one request per file so each keeps its own note.
+      // Already-associated rows are never touched; the fallback only feeds
+      // unassigned rows and must prefer this click's uploads over the stale
+      // lastNewInvoiceId state so it matches the backfill shown in the UI.
       if (attachmentRows.length > 0) {
-        const fallbackTarget = lastNewInvoiceId ?? uploadedIds[uploadedIds.length - 1];
+        const fallbackTarget = uploadedIds[uploadedIds.length - 1] ?? lastNewInvoiceId;
         const unassigned = attachmentRows.filter((r) => !r.targetInvoiceId && !fallbackTarget);
         if (unassigned.length > 0) {
           message.warning('请为每个附件选择关联的发票');
