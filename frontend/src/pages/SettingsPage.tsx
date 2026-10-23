@@ -85,6 +85,7 @@ export default function SettingsPage({ currentUser }: SettingsPageProps) {
       setAppSettings(data);
       ocrForm.setFieldsValue({
         ocr_engine: data.ocr_engine,
+        paddle_ocr_endpoint: data.paddle_ocr_endpoint ?? '',
         baidu_ocr_api_key: '',
         baidu_ocr_secret_key: '',
       });
@@ -229,6 +230,7 @@ export default function SettingsPage({ currentUser }: SettingsPageProps) {
 
   const handleSaveOcr = async (values: {
     ocr_engine: string;
+    paddle_ocr_endpoint?: string;
     baidu_ocr_api_key?: string;
     baidu_ocr_secret_key?: string;
   }) => {
@@ -236,6 +238,8 @@ export default function SettingsPage({ currentUser }: SettingsPageProps) {
     try {
       const data = await updateAppSettings({
         ocr_engine: values.ocr_engine,
+        // endpoint is not a secret: always send so clearing works (empty = 内置引擎)
+        paddle_ocr_endpoint: values.paddle_ocr_endpoint ?? '',
         baidu_ocr_api_key: values.baidu_ocr_api_key || undefined,
         baidu_ocr_secret_key: values.baidu_ocr_secret_key || undefined,
       });
@@ -406,6 +410,13 @@ export default function SettingsPage({ currentUser }: SettingsPageProps) {
                 <Radio value="local">本地 PaddleOCR（免费、离线、默认）</Radio>
                 <Radio value="baidu">百度智能云 · 增值税发票识别（需凭据，按量计费）</Radio>
               </Radio.Group>
+            </Form.Item>
+            <Form.Item
+              name="paddle_ocr_endpoint"
+              label="PaddleOCR 自定义服务地址（可选）"
+              extra="选择本地引擎时生效：填写远程 PaddleOCR HTTP 服务地址（如 http://192.168.1.10:9300/ocr），自动适配 PaddleX 产线与 PaddleHub 两种协议；留空使用内置本地引擎"
+            >
+              <Input placeholder="如 http://192.168.1.10:9300/ocr（留空使用内置引擎）" />
             </Form.Item>
             <div className={styles.twoColumns}>
               <Form.Item

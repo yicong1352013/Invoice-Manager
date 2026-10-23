@@ -1,5 +1,6 @@
 """OCR processing service for invoice images using PaddleOCR."""
 
+import base64
 import re
 import logging
 import threading
@@ -116,14 +117,23 @@ class OCRService:
             polys.append([])
         return texts, scores, polys
 
-    def _build_line_items(self, normalized: list) -> Tuple[List[str], List[float], List[Dict[str, Any]]]:
-        """Build line metadata from normalized (text, confidence, poly) items."""
+    def _build_line_items(self, normalized: list) -> Tuple[List[str], List[Optional[float]], List[Dict[str, Any]]]:
+        """Build line metadata from normalized (text, confidence, poly) items.
+
+        confidence may be None (remote engines without scores) — kept as None
+        so downstream averages stay honest instead of fabricating 0%.
+        """
         text_lines: List[str] = []
-        confidences: List[float] = []
+        confidences: List[Optional[float]] = []
         line_items: List[Dict[str, Any]] = []
 
         for text, confidence, poly in normalized:
-            conf_score = confidence * 100 if confidence <= 1.0 else confidence
+            if confidence is None:
+                conf_score = None
+            elif confidence <= 1.0:
+                conf_score = confidence * 100
+            else:
+                conf_score = confidence
             text_lines.append(text)
             confidences.append(conf_score)
 
@@ -152,7 +162,13 @@ class OCRService:
             return []
         return sorted(lines, key=lambda item: (round(item["min_y"] / 10), item["min_x"]))
 
-    def process_image(self, image_data: bytes) -> Tuple[str, float, List[Dict[str, Any]]]:
+    @staticmethod
+    def _average_confidence(confidences: List[Optional[float]]) -> Optional[float]:
+        """Average over lines that carry a score; None when no score exists."""
+        scored = [c for c in confidences if c is not None]
+        return sum(scored) / len(scored) if scored else None
+
+    def process_image(self, image_data: bytes) -> Tuple[str, Optional[float], List[Dict[str, Any]]]:
         """Process image bytes and extract text.
 
         Args:
@@ -169,7 +185,7 @@ class OCRService:
             text_lines, confidences, line_items = self._build_line_items(normalized)
             line_items = self._sort_lines_by_position(line_items)
             combined_text = "\n".join([line["text"] for line in line_items] or text_lines)
-            avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
+            avg_confidence = self._average_confidence(confidences)
 
             return combined_text, avg_confidence, line_items
 
@@ -232,7 +248,7 @@ class OCRService:
             logger.warning(f"PDF text layer extraction failed: {e}")
             return "", False
 
-    def process_pdf(self, pdf_data: bytes) -> Tuple[str, float, List[Dict[str, Any]]]:
+    def process_pdf(self, pdf_data: bytes) -> Tuple[str, Optional[float], List[Dict[str, Any]]]:
         """Process PDF and extract text from all pages.
 
         First tries to extract embedded text layer (faster, more accurate for digital PDFs),
@@ -277,13 +293,125 @@ class OCRService:
 
             all_lines = self._sort_lines_by_position(all_lines)
             combined_text = "\n".join([line["text"] for line in all_lines] or all_text)
-            avg_confidence = sum(all_confidences) / len(all_confidences) if all_confidences else 0.0
+            avg_confidence = self._average_confidence(all_confidences)
 
             return combined_text, avg_confidence, all_lines
 
         except Exception as e:
             logger.error(f"PDF processing failed: {e}")
             raise
+
+
+def parse_remote_paddle_response(payload: Any) -> list:
+    """Tolerant parser for PaddleOCR-style HTTP results.
+
+    Supported shapes (normalized to [(text, confidence|None, poly), ...]):
+    - PaddleX / PaddleOCR 3.x pipeline serving:
+      {"result": {"rec_texts": [...], "rec_scores": [...], "dt_polys": [...]}}
+      (also nested once under "ocrResults", or at the payload root)
+    - Classic PaddleHub serving:
+      {"results": [[[text, poly, (score)], ...], ...]}  (score optional)
+
+    Lines without a score keep confidence=None so the pipeline judges by
+    field completeness, exactly like the Baidu structured engine.
+    """
+
+    def from_result_dict(data: Dict[str, Any]) -> list:
+        texts = list(data.get("rec_texts") or [])
+        raw_scores = list(data.get("rec_scores") or [])
+        polys = list(data.get("dt_polys") or data.get("rec_polys") or [])
+        out = []
+        for i, text in enumerate(texts):
+            if not text:
+                continue
+            score = raw_scores[i] if i < len(raw_scores) else None
+            poly = polys[i] if i < len(polys) else []
+            out.append((text, score, poly))
+        return out
+
+    def from_hub_items(items: list) -> list:
+        out = []
+        for item in items:
+            if isinstance(item, (list, tuple)) and len(item) >= 2 and item[0]:
+                score = item[2] if len(item) >= 3 else None
+                out.append((item[0], score, item[1]))
+        return out
+
+    if not isinstance(payload, dict):
+        return []
+
+    node = payload.get("result")
+    if node is None:
+        node = payload.get("results")
+    if node is None:
+        node = payload
+
+    if isinstance(node, dict):
+        ocr_results = node.get("ocrResults")
+        if isinstance(ocr_results, list) and ocr_results and isinstance(ocr_results[0], dict):
+            return from_result_dict(ocr_results[0])
+        return from_result_dict(node)
+
+    if isinstance(node, list):
+        first = node[0] if node else None
+        if isinstance(first, dict):
+            return from_result_dict(first)
+        if isinstance(first, list):
+            return from_hub_items(first)
+
+    return []
+
+
+class RemotePaddleOCRService(OCRService):
+    """OCR against a custom PaddleOCR HTTP endpoint (paddle_ocr_endpoint setting).
+
+    Inherits the full OCRService contract (image/pdf processing, line
+    building, reading order) and only swaps recognition for HTTP calls.
+    The wire format is auto-detected once and remembered: multipart file
+    upload (PaddleX / PaddleOCR 3.x pipeline serving) first, classic
+    PaddleHub JSON {"images": [base64]} as fallback.
+    """
+
+    def __init__(self, endpoint: str, timeout: float = 60.0):
+        super().__init__()
+        self.endpoint = endpoint.strip().rstrip("/")
+        self.timeout = timeout
+        self._json_mode = False  # remembers the contract that worked
+
+    def _post(self, image_bytes: bytes):
+        import httpx
+
+        if self._json_mode:
+            return httpx.post(
+                self.endpoint,
+                json={"images": [base64.b64encode(image_bytes).decode("utf-8")]},
+                timeout=self.timeout,
+            )
+        return httpx.post(self.endpoint, files={"file": image_bytes}, timeout=self.timeout)
+
+    def _invoke_ocr(self, image_array) -> list:
+        """Re-encode the array as PNG and recognize via the remote service."""
+        buf = BytesIO()
+        Image.fromarray(np.asarray(image_array)).save(buf, format="PNG")
+
+        resp = self._post(buf.getvalue())
+        if resp.status_code >= 400 and not self._json_mode:
+            logger.info(
+                f"Remote PaddleOCR endpoint returned {resp.status_code} for multipart, "
+                f"retrying with PaddleHub JSON contract"
+            )
+            self._json_mode = True
+            resp = self._post(buf.getvalue())
+        resp.raise_for_status()
+
+        normalized = parse_remote_paddle_response(resp.json())
+        if not normalized and not self._json_mode:
+            # 200 but unparseable: maybe a hub-contract endpoint — one more try
+            self._json_mode = True
+            resp = self._post(buf.getvalue())
+            resp.raise_for_status()
+            normalized = parse_remote_paddle_response(resp.json())
+        return normalized
 
 
 class FieldExtractor:
@@ -636,6 +764,10 @@ class FieldExtractor:
                     result['buyer_name'] = inline_buyer
                 if inline_seller and not result['seller_name']:
                     result['seller_name'] = inline_seller
+                # The line is fully consumed by the inline parse: running the
+                # generic name pattern on it would capture the whole line
+                # ("公司甲 销 名称:公司乙") and overwrite the correct value.
+                continue
             name_match = re.search(name_pattern, text)
             tax_match = re.search(tax_id_pattern, text, re.IGNORECASE)
 

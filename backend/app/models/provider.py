@@ -51,6 +51,7 @@ class AppSetting(Base):
 # Well-known app setting keys
 SETTING_ACTIVE_PROVIDER_ID = "active_provider_id"
 SETTING_OCR_ENGINE = "ocr_engine"  # 'local' | 'baidu' (consumed from Phase 3)
+SETTING_PADDLE_OCR_ENDPOINT = "paddle_ocr_endpoint"  # custom PaddleOCR HTTP service; empty = in-process engine
 SETTING_BAIDU_OCR_API_KEY = "baidu_ocr_api_key"
 SETTING_BAIDU_OCR_SECRET_KEY = "baidu_ocr_secret_key"
 SETTING_MCP_ENABLED = "mcp_enabled"  # consumed from Phase 6

@@ -75,6 +75,7 @@ def _run_ocr(
     baidu_secret_key: Optional[str],
     file_data: bytes,
     file_type: str,
+    paddle_endpoint: Optional[str] = None,
 ) -> OcrOutcome:
     """Run the selected OCR engine in a worker thread."""
     if engine == "baidu":
@@ -88,14 +89,21 @@ def _run_ocr(
             raw_text, fields = service.process_image(file_data)
         return OcrOutcome(engine="baidu", raw_text=raw_text, confidence=None, fields=fields)
 
-    ocr_service = get_ocr_service()
+    from app.services.ocr_service import RemotePaddleOCRService
+    if paddle_endpoint:
+        # custom PaddleOCR HTTP service instead of the in-process engine
+        ocr_service = RemotePaddleOCRService(paddle_endpoint)
+        engine_name = "paddle_remote"
+    else:
+        ocr_service = get_ocr_service()
+        engine_name = "local"
     extractor = get_field_extractor()
     if file_type == 'pdf':
         raw_text, confidence, ocr_lines = ocr_service.process_pdf(file_data)
     else:
         raw_text, confidence, ocr_lines = ocr_service.process_image(file_data)
     fields = extractor.extract_fields(raw_text, ocr_lines)
-    return OcrOutcome(engine="local", raw_text=raw_text, confidence=confidence, fields=fields)
+    return OcrOutcome(engine=engine_name, raw_text=raw_text, confidence=confidence, fields=fields)
 
 
 def _ocr_sufficient(outcome: OcrOutcome, accept_confidence: float) -> bool:
@@ -206,6 +214,7 @@ async def process_invoice(invoice_id: int, db: AsyncSession) -> bool:
         SETTING_BAIDU_OCR_API_KEY,
         SETTING_BAIDU_OCR_SECRET_KEY,
         SETTING_OCR_ENGINE,
+        SETTING_PADDLE_OCR_ENDPOINT,
     )
     from app.services.provider_service import get_setting
 
@@ -229,6 +238,7 @@ async def process_invoice(invoice_id: int, db: AsyncSession) -> bool:
         engine = await get_setting(db, SETTING_OCR_ENGINE, "local") or "local"
         baidu_key = await get_setting(db, SETTING_BAIDU_OCR_API_KEY)
         baidu_secret = await get_setting(db, SETTING_BAIDU_OCR_SECRET_KEY)
+        paddle_endpoint = await get_setting(db, SETTING_PADDLE_OCR_ENDPOINT)
         llm_service = LLMService(await get_active_provider_row(db))
 
         loop = asyncio.get_running_loop()
@@ -236,7 +246,7 @@ async def process_invoice(invoice_id: int, db: AsyncSession) -> bool:
         # Step 1: OCR (CPU-bound pool)
         outcome = await loop.run_in_executor(
             _ocr_executor, _run_ocr, engine, baidu_key, baidu_secret,
-            invoice.file_data, invoice.file_type,
+            invoice.file_data, invoice.file_type, paddle_endpoint,
         )
         logger.info(
             f"OCR ({outcome.engine}) completed: {len(outcome.fields)} fields, "
