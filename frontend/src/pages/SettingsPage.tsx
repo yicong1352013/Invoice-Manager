@@ -414,7 +414,7 @@ export default function SettingsPage({ currentUser }: SettingsPageProps) {
             <Form.Item
               name="paddle_ocr_endpoint"
               label="PaddleOCR 自定义服务地址（可选）"
-              extra="选择本地引擎时生效：填写远程 PaddleOCR HTTP 服务地址（如 http://192.168.1.10:9300/ocr），自动适配 PaddleX 产线与 PaddleHub 两种协议；留空使用内置本地引擎"
+              extra="选择本地引擎时生效：填写 PaddleX 服务地址（如 http://192.168.66.32:8080/ocr，AIStudio 风格 JSON 接口），自动兼容官方上传式产线接口；留空使用内置本地引擎"
             >
               <Input placeholder="如 http://192.168.1.10:9300/ocr（留空使用内置引擎）" />
             </Form.Item>

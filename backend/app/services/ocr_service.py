@@ -303,14 +303,16 @@ class OCRService:
 
 
 def parse_remote_paddle_response(payload: Any) -> list:
-    """Tolerant parser for PaddleOCR-style HTTP results.
+    """Tolerant parser for PaddleX-style OCR HTTP results.
 
     Supported shapes (normalized to [(text, confidence|None, poly), ...]):
-    - PaddleX / PaddleOCR 3.x pipeline serving:
+    - PaddleX AIStudio-style serving (paddlex --serve, JSON body):
+      {"errorCode": 0, "result": {"ocrResults": [{"prunedResult":
+          {"rec_texts": [...], "rec_scores": [...], "rec_polys"/"dt_polys": [...]}}]}}
+      Multiple ocrResults entries are PDF pages and are concatenated in order.
+    - Plain PaddleX pipeline serving (multipart upload):
       {"result": {"rec_texts": [...], "rec_scores": [...], "dt_polys": [...]}}
-      (also nested once under "ocrResults", or at the payload root)
-    - Classic PaddleHub serving:
-      {"results": [[[text, poly, (score)], ...], ...]}  (score optional)
+      (also accepted at the payload root)
 
     Lines without a score keep confidence=None so the pipeline judges by
     field completeness, exactly like the Baidu structured engine.
@@ -329,35 +331,25 @@ def parse_remote_paddle_response(payload: Any) -> list:
             out.append((text, score, poly))
         return out
 
-    def from_hub_items(items: list) -> list:
-        out = []
-        for item in items:
-            if isinstance(item, (list, tuple)) and len(item) >= 2 and item[0]:
-                score = item[2] if len(item) >= 3 else None
-                out.append((item[0], score, item[1]))
-        return out
-
     if not isinstance(payload, dict):
         return []
 
-    node = payload.get("result")
-    if node is None:
-        node = payload.get("results")
-    if node is None:
-        node = payload
+    result = payload.get("result")
+    if not isinstance(result, (dict, list)):
+        result = payload
 
-    if isinstance(node, dict):
-        ocr_results = node.get("ocrResults")
-        if isinstance(ocr_results, list) and ocr_results and isinstance(ocr_results[0], dict):
-            return from_result_dict(ocr_results[0])
-        return from_result_dict(node)
-
-    if isinstance(node, list):
-        first = node[0] if node else None
-        if isinstance(first, dict):
-            return from_result_dict(first)
-        if isinstance(first, list):
-            return from_hub_items(first)
+    if isinstance(result, dict):
+        ocr_results = result.get("ocrResults")
+        if isinstance(ocr_results, list) and ocr_results:
+            out: list = []
+            for item in ocr_results:
+                if isinstance(item, dict):
+                    pruned = item.get("prunedResult")
+                    inner = pruned if isinstance(pruned, dict) else item
+                    out.extend(from_result_dict(inner))
+            if out:
+                return out
+        return from_result_dict(result)
 
     return []
 
@@ -367,27 +359,31 @@ class RemotePaddleOCRService(OCRService):
 
     Inherits the full OCRService contract (image/pdf processing, line
     building, reading order) and only swaps recognition for HTTP calls.
-    The wire format is auto-detected once and remembered: multipart file
-    upload (PaddleX / PaddleOCR 3.x pipeline serving) first, classic
-    PaddleHub JSON {"images": [base64]} as fallback.
+
+    Wire format targets the PaddleX AIStudio-style serving API
+    (``paddlex --serve``): POST {endpoint} JSON ``{"file": <raw base64>,
+    "fileType": 1}``. If the deployment answers 4xx to that body (plain
+    PaddleX pipeline serving expects a multipart file upload instead), the
+    request is retried once as multipart and the working style remembered.
     """
 
-    def __init__(self, endpoint: str, timeout: float = 60.0):
+    def __init__(self, endpoint: str, timeout: float = 120.0):
         super().__init__()
         self.endpoint = endpoint.strip().rstrip("/")
         self.timeout = timeout
-        self._json_mode = False  # remembers the contract that worked
+        self._multipart_mode = False  # remembers the contract that worked
 
     def _post(self, image_bytes: bytes):
         import httpx
 
-        if self._json_mode:
-            return httpx.post(
-                self.endpoint,
-                json={"images": [base64.b64encode(image_bytes).decode("utf-8")]},
-                timeout=self.timeout,
-            )
-        return httpx.post(self.endpoint, files={"file": image_bytes}, timeout=self.timeout)
+        if self._multipart_mode:
+            return httpx.post(self.endpoint, files={"file": image_bytes}, timeout=self.timeout)
+        b64 = base64.b64encode(image_bytes).decode("utf-8")
+        return httpx.post(
+            self.endpoint,
+            json={"file": b64, "fileType": 1},
+            timeout=self.timeout,
+        )
 
     def _invoke_ocr(self, image_array) -> list:
         """Re-encode the array as PNG and recognize via the remote service."""
@@ -395,23 +391,21 @@ class RemotePaddleOCRService(OCRService):
         Image.fromarray(np.asarray(image_array)).save(buf, format="PNG")
 
         resp = self._post(buf.getvalue())
-        if resp.status_code >= 400 and not self._json_mode:
+        if resp.status_code >= 400 and not self._multipart_mode:
             logger.info(
-                f"Remote PaddleOCR endpoint returned {resp.status_code} for multipart, "
-                f"retrying with PaddleHub JSON contract"
+                f"Remote PaddleOCR endpoint returned {resp.status_code} for the JSON body, "
+                f"retrying as multipart file upload"
             )
-            self._json_mode = True
+            self._multipart_mode = True
             resp = self._post(buf.getvalue())
         resp.raise_for_status()
 
-        normalized = parse_remote_paddle_response(resp.json())
-        if not normalized and not self._json_mode:
-            # 200 but unparseable: maybe a hub-contract endpoint — one more try
-            self._json_mode = True
-            resp = self._post(buf.getvalue())
-            resp.raise_for_status()
-            normalized = parse_remote_paddle_response(resp.json())
-        return normalized
+        payload = resp.json()
+        if isinstance(payload, dict) and payload.get("errorCode") not in (None, 0):
+            raise RuntimeError(
+                f"远程 PaddleOCR 服务返回错误: {payload.get('errorMsg') or payload.get('errorCode')}"
+            )
+        return parse_remote_paddle_response(payload)
 
 
 class FieldExtractor:
