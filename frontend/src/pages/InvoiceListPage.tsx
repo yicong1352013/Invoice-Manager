@@ -36,6 +36,7 @@ import { useColumnSettings } from '../hooks/useColumnSettings';
 import { useInvoiceStatistics } from '../hooks/useInvoiceStatistics';
 import MetricCard from '../components/dashboard/MetricCard';
 import ControlBar from '../components/dashboard/ControlBar';
+import UploadModal from '../components/UploadModal';
 import styles from './InvoiceListPage.module.css';
 import 'react-resizable/css/styles.css';
 
@@ -58,6 +59,7 @@ function InvoiceListPage() {
   const [pageSize, setPageSize] = useState(20);
   const [selectedRowKeys, setSelectedRowKeys] = useState<number[]>([]);
   const [statistics, setStatistics] = useState<Statistics | null>(null);
+  const [uploadOpen, setUploadOpen] = useState(false);
 
   // Filters
   const [statusFilter, setStatusFilter] = useState<string | undefined>();
@@ -569,33 +571,10 @@ function InvoiceListPage() {
           <p className={styles.pageSubtitle}>管理和查看所有发票记录</p>
         </div>
         <div className={styles.headerActions}>
-          <Dropdown
-            menu={{
-              items: [
-                { key: 'excel', label: '导出 Excel' },
-                { key: 'csv', label: '导出 CSV' },
-                { key: 'word', label: '导出 Word' },
-                { key: 'pdf', label: '导出 PDF' },
-              ],
-              onClick: ({ key }) => handleExport(key as 'csv' | 'excel' | 'word' | 'pdf'),
-            }}
-          >
-            <Button icon={<DownloadOutlined />} className={styles.secondaryButton}>
-              导出
-            </Button>
-          </Dropdown>
-          <Button
-            icon={<PrinterOutlined />}
-            onClick={handlePrint}
-            disabled={selectedRowKeys.length === 0}
-            className={styles.secondaryButton}
-          >
-            打印{selectedRowKeys.length > 0 ? ` (${selectedRowKeys.length})` : ''}
-          </Button>
           <Button
             type="primary"
             icon={<UploadOutlined />}
-            onClick={() => navigate('/upload')}
+            onClick={() => setUploadOpen(true)}
             className={styles.primaryButton}
           >
             上传发票
@@ -688,8 +667,28 @@ function InvoiceListPage() {
           刷新
         </Button>
 
-        <Button icon={<DownloadOutlined />} onClick={() => handleExport('csv')}>
-          导出CSV
+        <Dropdown
+          menu={{
+            items: [
+              { key: 'excel', label: '导出 Excel' },
+              { key: 'csv', label: '导出 CSV' },
+              { key: 'word', label: '导出 Word' },
+              { key: 'pdf', label: '导出 PDF' },
+            ],
+            onClick: ({ key }) => handleExport(key as 'csv' | 'excel' | 'word' | 'pdf'),
+          }}
+        >
+          <Button icon={<DownloadOutlined />}>
+            导出{selectedRowKeys.length > 0 ? ` (${selectedRowKeys.length})` : ''}
+          </Button>
+        </Dropdown>
+
+        <Button
+          icon={<PrinterOutlined />}
+          onClick={handlePrint}
+          disabled={selectedRowKeys.length === 0}
+        >
+          打印{selectedRowKeys.length > 0 ? ` (${selectedRowKeys.length})` : ''}
         </Button>
 
         <ColumnSelector columns={columnConfigs} onChange={setColumnConfigs} />
@@ -779,6 +778,13 @@ function InvoiceListPage() {
           />
         </div>
       </div>
+
+      {/* Upload modal (Kingdee-style, replaces the standalone upload page) */}
+      <UploadModal
+        open={uploadOpen}
+        onClose={() => setUploadOpen(false)}
+        onCompleted={fetchInvoices}
+      />
     </div>
   );
 }

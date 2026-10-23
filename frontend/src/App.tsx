@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
-import UploadPage from './pages/UploadPage';
 import InvoiceListPage from './pages/InvoiceListPage';
 import InvoiceDetailPage from './pages/InvoiceDetailPage';
 import LoginPage from './pages/LoginPage';
@@ -90,7 +89,6 @@ function AppContent() {
     >
       <Routes>
         <Route path="/" element={<InvoiceListPage />} />
-        <Route path="/upload" element={<UploadPage />} />
         <Route path="/invoices/:id" element={<InvoiceDetailPage />} />
         <Route
           path="/settings"
