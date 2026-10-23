@@ -57,10 +57,11 @@ CRITICAL_FIELDS = [
 @dataclass
 class OcrOutcome:
     """Normalized result of one OCR engine run."""
-    engine: str                                   # 'local' | 'baidu'
+    engine: str                                   # 'local' | 'paddle_remote' | 'baidu'
     raw_text: str
     confidence: Optional[float]                   # None when engine gives no score
     fields: Dict[str, Any] = field(default_factory=dict)
+    raw_response: Optional[str] = None            # engine's verbatim output (debug/audit)
 
 
 def _reset_extracted_fields(invoice: Invoice) -> None:
@@ -100,11 +101,12 @@ def _run_ocr(
         engine_name = "local"
     extractor = get_field_extractor()
     if file_type == 'pdf':
-        raw_text, confidence, ocr_lines = ocr_service.process_pdf(file_data)
+        raw_text, confidence, ocr_lines, raw_response = ocr_service.process_pdf(file_data)
     else:
-        raw_text, confidence, ocr_lines = ocr_service.process_image(file_data)
+        raw_text, confidence, ocr_lines, raw_response = ocr_service.process_image(file_data)
     fields = extractor.extract_fields(raw_text, ocr_lines)
-    return OcrOutcome(engine=engine_name, raw_text=raw_text, confidence=confidence, fields=fields)
+    return OcrOutcome(engine=engine_name, raw_text=raw_text, confidence=confidence,
+                      fields=fields, raw_response=raw_response)
 
 
 def _ocr_sufficient(outcome: OcrOutcome, accept_confidence: float) -> bool:
@@ -275,6 +277,7 @@ async def process_invoice(invoice_id: int, db: AsyncSession) -> bool:
         ocr_result = OcrResult(
             invoice_id=invoice_id,
             raw_text=outcome.raw_text,
+            raw_response=outcome.raw_response,
             invoice_number=outcome.fields.get('invoice_number'),
             issue_date=outcome.fields.get('issue_date'),
             buyer_name=outcome.fields.get('buyer_name'),

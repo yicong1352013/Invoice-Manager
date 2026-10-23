@@ -67,6 +67,7 @@ class OcrResultResponse(BaseModel):
     id: int
     invoice_id: int
     raw_text: Optional[str] = None
+    raw_response: Optional[str] = None  # verbatim engine output before cleanup
     invoice_number: Optional[str] = None
     issue_date: Optional[str] = None
     buyer_name: Optional[str] = None

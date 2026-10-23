@@ -116,9 +116,13 @@ class _FakeHttpx:
 
 
 def _resp(status_code=200, payload=None):
+    import json as json_mod
+
+    body = json_mod.dumps(payload if payload is not None else {}, ensure_ascii=False)
     return SimpleNamespace(
         status_code=status_code,
         raise_for_status=lambda: None,
+        text=body,
         json=lambda: payload if payload is not None else {},
     )
 
@@ -224,12 +228,14 @@ def test_remote_service_sends_whole_pdf_natively(monkeypatch):
     }
     monkeypatch.setattr("httpx.post", _FakeHttpx([_resp(200, two_pages)]))
 
-    text, confidence, lines = service.process_pdf(b"%PDF-fake")
+    text, confidence, lines, raw_response = service.process_pdf(b"%PDF-fake")
     assert "第一页甲" in text and "第二页丙" in text
     # page order preserved even though page 2's local y (100) would sort
     # between page 1's lines without the page offset
     assert [l["text"] for l in lines] == ["第一页甲", "第一页乙", "第二页丙"]
     assert confidence is not None
+    # the verbatim service body is carried through for the detail page
+    assert raw_response is not None and "第一页甲" in raw_response
 
 
 def test_parse_remote_paddle_pages_keeps_pages_separate():
@@ -257,7 +263,7 @@ def test_process_image_reports_average_confidence(monkeypatch):
     Image.new("RGB", (40, 20), "white").save(buf, format="PNG")
 
     service = RemotePaddleOCRService("http://192.168.66.32:8080/ocr")
-    text, confidence, lines = service.process_image(buf.getvalue())
+    text, confidence, lines, raw_response = service.process_image(buf.getvalue())
 
     assert "发票号码" in text
     assert confidence == (0.98 + 0.91) / 2 * 100

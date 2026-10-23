@@ -201,26 +201,35 @@ class OCRService:
         scored = [c for c in confidences if c is not None]
         return sum(scored) / len(scored) if scored else None
 
-    def process_image(self, image_data: bytes) -> Tuple[str, Optional[float], List[Dict[str, Any]]]:
+    def _capture_raw_response(self, normalized: list) -> Optional[str]:
+        """Hook: engines with a verbatim payload (remote service) return it."""
+        return None
+
+    def process_image(self, image_data: bytes) -> Tuple[str, Optional[float], List[Dict[str, Any]], Optional[str]]:
         """Process image bytes and extract text.
 
         Args:
             image_data: Raw image bytes
 
         Returns:
-            Tuple of (extracted_text, average_confidence, ocr_lines)
+            Tuple of (extracted_text, average_confidence, ocr_lines,
+            raw_response) — raw_response is the engine's verbatim output
+            before any cleanup, for debugging/audit.
         """
         try:
             image = Image.open(BytesIO(image_data))
             image_array = np.array(image)
 
             normalized = self._invoke_ocr(image_array)
+            raw_response = self._capture_raw_response(normalized) or "\n".join(
+                text for text, _, _ in normalized
+            )
             text_lines, confidences, line_items = self._build_line_items(normalized)
             line_items = self._sort_lines_by_position(line_items)
             combined_text = "\n".join([line["text"] for line in line_items] or text_lines)
             avg_confidence = self._average_confidence(confidences)
 
-            return combined_text, avg_confidence, line_items
+            return combined_text, avg_confidence, line_items, raw_response
 
         except Exception as e:
             logger.error(f"OCR processing failed: {e}")
@@ -236,7 +245,7 @@ class OCRService:
             pdf_data: Raw PDF bytes
 
         Returns:
-            Tuple of (extracted_text, has_useful_text)
+            Tuple of (extracted_text, has_useful_text, raw_pre_cleanup_text)
         """
         try:
             import pdfplumber
@@ -250,10 +259,12 @@ class OCRService:
 
             try:
                 all_text = []
+                raw_text_pages = []
                 with pdfplumber.open(temp_pdf) as pdf:
                     for page in pdf.pages:
                         text = page.extract_text()
                         if text:
+                            raw_text_pages.append(text)
                             # Digital VAT PDFs carry the cipher zone in their
                             # text layer, row-merged into seller-block lines by
                             # pdfplumber — same cleanup as the OCR image path.
@@ -279,15 +290,15 @@ class OCRService:
                 else:
                     logger.debug(f"PDF text extraction got {len(combined_text)} chars but no useful invoice data")
 
-                return combined_text, has_useful
+                return combined_text, has_useful, "\n\n".join(raw_text_pages)
             finally:
                 os.unlink(temp_pdf)
 
         except Exception as e:
             logger.warning(f"PDF text layer extraction failed: {e}")
-            return "", False
+            return "", False, None
 
-    def process_pdf(self, pdf_data: bytes) -> Tuple[str, Optional[float], List[Dict[str, Any]]]:
+    def process_pdf(self, pdf_data: bytes) -> Tuple[str, Optional[float], List[Dict[str, Any]], Optional[str]]:
         """Process PDF and extract text from all pages.
 
         First tries to extract embedded text layer (faster, more accurate for digital PDFs),
@@ -297,17 +308,18 @@ class OCRService:
             pdf_data: Raw PDF bytes
 
         Returns:
-            Tuple of (extracted_text, average_confidence, ocr_lines)
+            Tuple of (extracted_text, average_confidence, ocr_lines,
+            raw_response) — raw_response is the pre-cleanup text/payload.
         """
         # First try to extract embedded text layer (in-process engine only —
         # see prefer_text_layer)
         if self.prefer_text_layer:
-            text_layer, has_useful_text = self._extract_pdf_text_layer(pdf_data)
+            text_layer, has_useful_text, raw_layer = self._extract_pdf_text_layer(pdf_data)
 
             if has_useful_text:
                 logger.info("Using PDF embedded text layer instead of OCR")
                 # High confidence for embedded text
-                return text_layer, 99.0, []
+                return text_layer, 99.0, [], raw_layer
 
         # Fall back to OCR for scanned PDFs
         logger.info("PDF has no useful text layer, falling back to OCR")
@@ -323,10 +335,13 @@ class OCRService:
             all_text = []
             all_confidences = []
             all_lines: List[Dict[str, Any]] = []
+            raw_pages: List[str] = []
 
             for image in images:
                 image_array = np.array(image)
                 normalized = self._invoke_ocr(image_array)
+                raw_pages.append(self._capture_raw_response(normalized) or
+                                 "\n".join(text for text, _, _ in normalized))
                 text_lines, confidences, line_items = self._build_line_items(normalized)
                 all_text.extend(text_lines)
                 all_confidences.extend(confidences)
@@ -336,7 +351,7 @@ class OCRService:
             combined_text = "\n".join([line["text"] for line in all_lines] or all_text)
             avg_confidence = self._average_confidence(all_confidences)
 
-            return combined_text, avg_confidence, all_lines
+            return combined_text, avg_confidence, all_lines, "\n\n".join(raw_pages)
 
         except Exception as e:
             logger.error(f"PDF processing failed: {e}")
@@ -428,12 +443,17 @@ class RemotePaddleOCRService(OCRService):
     # page 1..N after position-based line sorting
     _PAGE_Y_STRIDE = 1_000_000
 
+    # cap for the stored verbatim service response (defensive only —
+    # recognition payloads are a few KB)
+    _RAW_RESPONSE_CAP = 512_000
+
     def __init__(self, endpoint: str, api_key: Optional[str] = None, timeout: float = 120.0):
         super().__init__()
         self.endpoint = endpoint.strip().rstrip("/")
         self.api_key = (api_key or "").strip() or None
         self.timeout = timeout
         self._multipart_mode = False  # remembers the contract that worked
+        self._raw_service_response: Optional[str] = None  # verbatim body of the last call
 
     def _auth_headers(self) -> Dict[str, str]:
         if not self.api_key:
@@ -459,6 +479,10 @@ class RemotePaddleOCRService(OCRService):
             timeout=self.timeout,
         )
 
+    def _capture_raw_response(self, normalized: list) -> Optional[str]:
+        """The remote service's verbatim response body from the last call."""
+        return self._raw_service_response
+
     def _invoke_ocr(self, image_array) -> list:
         """Re-encode the array as PNG and recognize via the remote service."""
         buf = BytesIO()
@@ -473,6 +497,7 @@ class RemotePaddleOCRService(OCRService):
             self._multipart_mode = True
             resp = self._post(buf.getvalue())
         resp.raise_for_status()
+        self._raw_service_response = resp.text[: self._RAW_RESPONSE_CAP]
 
         payload = resp.json()
         if isinstance(payload, dict) and payload.get("errorCode") not in (None, 0):
@@ -481,7 +506,7 @@ class RemotePaddleOCRService(OCRService):
             )
         return parse_remote_paddle_response(payload)
 
-    def process_pdf(self, pdf_data: bytes) -> Tuple[str, Optional[float], List[Dict[str, Any]]]:
+    def process_pdf(self, pdf_data: bytes) -> Tuple[str, Optional[float], List[Dict[str, Any]], Optional[str]]:
         """Recognize a whole PDF natively on the remote service (fileType=0).
 
         The service renders pages itself (≤20 pages) and returns one
@@ -494,6 +519,7 @@ class RemotePaddleOCRService(OCRService):
             self._multipart_mode = True
             resp = self._post(pdf_data, file_type=0)
         resp.raise_for_status()
+        self._raw_service_response = resp.text[: self._RAW_RESPONSE_CAP]
 
         payload = resp.json()
         if isinstance(payload, dict) and payload.get("errorCode") not in (None, 0):
@@ -516,7 +542,7 @@ class RemotePaddleOCRService(OCRService):
 
         all_lines = self._sort_lines_by_position(all_lines)
         combined = "\n".join(line["text"] for line in all_lines)
-        return combined, self._average_confidence(all_confidences), all_lines
+        return combined, self._average_confidence(all_confidences), all_lines, self._raw_service_response
 
 
 class FieldExtractor:

@@ -11,6 +11,7 @@ import {
   Input,
   Select,
   Modal,
+  Collapse,
 } from 'antd';
 import {
   ArrowLeftOutlined,
@@ -62,6 +63,15 @@ const fieldLabels: Record<string, string> = {
   tax_rate: '税率',
   tax_amount: '税额',
 };
+
+/** Pretty-print the service raw response when it is JSON, else return as-is. */
+function formatRawResponse(raw: string): string {
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2);
+  } catch {
+    return raw;
+  }
+}
 
 function InvoiceDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -599,6 +609,39 @@ function InvoiceDetailPage() {
             </div>
             </Spin>
           </div>
+
+          {/* Recognition raw text (service verbatim vs cleaned) */}
+          {invoice.ocr_result && (invoice.ocr_result.raw_response || invoice.ocr_result.raw_text) && (
+            <div className={styles.card}>
+              <div className={styles.cardHeader}>
+                <div className={styles.cardTitle}>识别原文</div>
+              </div>
+              <div className={styles.cardBody}>
+                <Collapse
+                  items={[
+                    ...(invoice.ocr_result.raw_response
+                      ? [{
+                          key: 'service',
+                          label: 'PaddleOCR 服务返回原文（未处理）',
+                          children: (
+                            <pre className={styles.rawPre}>
+                              {formatRawResponse(invoice.ocr_result.raw_response)}
+                            </pre>
+                          ),
+                        }]
+                      : []),
+                    ...(invoice.ocr_result.raw_text
+                      ? [{
+                          key: 'cleaned',
+                          label: '清洗后用于字段提取的文本',
+                          children: <pre className={styles.rawPre}>{invoice.ocr_result.raw_text}</pre>,
+                        }]
+                      : []),
+                  ]}
+                />
+              </div>
+            </div>
+          )}
 
           {/* Custom Value Modal */}
           <Modal

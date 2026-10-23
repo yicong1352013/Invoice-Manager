@@ -89,7 +89,7 @@ export interface ParsingDiff {
 }
 
 export interface InvoiceDetail extends Invoice {
-  ocr_result: OcrResult | null;
+  ocr_result: (OcrResult & { raw_response?: string | null }) | null;
   llm_result: LlmResult | null;
   parsing_diffs: ParsingDiff[];
 }

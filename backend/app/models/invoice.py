@@ -78,6 +78,10 @@ class OcrResult(Base):
 
     # Parsed fields from OCR
     raw_text = Column(Text, nullable=True)  # 原始OCR文本
+    # Verbatim recognition-engine output before any cleanup: the remote
+    # PaddleOCR service's response body (JSON) or the local engine's
+    # pre-cleanup lines — shown on the detail page for debugging
+    raw_response = Column(Text, nullable=True)
     invoice_number = Column(String(50), nullable=True)
     issue_date = Column(String(50), nullable=True)
     buyer_name = Column(String(255), nullable=True)

@@ -52,6 +52,7 @@ _SCHEMA_PATCHES = [
     "ALTER TABLE llm_providers ADD COLUMN IF NOT EXISTS api_mode VARCHAR(10) NOT NULL DEFAULT 'chat'",
     "ALTER TABLE llm_providers ADD COLUMN IF NOT EXISTS temperature DOUBLE PRECISION",
     "ALTER TABLE llm_providers ADD COLUMN IF NOT EXISTS max_output_tokens INTEGER",
+    "ALTER TABLE ocr_results ADD COLUMN IF NOT EXISTS raw_response TEXT",
     # PG enum for InvoiceStatus. The model maps SQLEnum(InvoiceStatus) by
     # python NAME (rows store "REVIEWING"; Chinese labels live at the JSON
     # layer), so the new value is added as its name 'FAILED'. A stray
