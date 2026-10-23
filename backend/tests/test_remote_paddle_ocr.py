@@ -169,6 +169,42 @@ def test_error_code_raises_with_service_message(monkeypatch):
         assert "Invalid input file" in str(e)
 
 
+def test_api_key_sent_in_both_conventional_headers(monkeypatch):
+    fake = _FakeHttpx([_resp(200, AISTUDIO_PAYLOAD)])
+    monkeypatch.setattr("httpx.post", fake)
+
+    service = RemotePaddleOCRService("http://192.168.66.32:8080/ocr", api_key="proxy-secret-1")
+    service._invoke_ocr(_white_image_array())
+
+    headers = fake.calls[0][1]["headers"]
+    assert headers["Authorization"] == "Bearer proxy-secret-1"
+    assert headers["X-API-Key"] == "proxy-secret-1"
+
+
+def test_no_api_key_sends_no_auth_headers(monkeypatch):
+    fake = _FakeHttpx([_resp(200, AISTUDIO_PAYLOAD)])
+    monkeypatch.setattr("httpx.post", fake)
+
+    service = RemotePaddleOCRService("http://192.168.66.32:8080/ocr")
+    service._invoke_ocr(_white_image_array())
+
+    headers = fake.calls[0][1].get("headers") or {}
+    assert "Authorization" not in headers
+    assert "X-API-Key" not in headers
+
+
+def test_api_key_kept_on_multipart_fallback(monkeypatch):
+    fake = _FakeHttpx([_resp(401), _resp(200, PLAIN_PADDLEX_PAYLOAD)])
+    monkeypatch.setattr("httpx.post", fake)
+
+    service = RemotePaddleOCRService("http://paddlex-official:8080/ocr", api_key="proxy-secret-1")
+    service._invoke_ocr(_white_image_array())
+
+    assert service._multipart_mode is True
+    headers = fake.calls[1][1]["headers"]
+    assert headers["X-API-Key"] == "proxy-secret-1"
+
+
 def test_process_image_reports_average_confidence(monkeypatch):
     import io
 

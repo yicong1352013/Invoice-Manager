@@ -56,6 +56,8 @@ export interface LLMStatusResponse {
 export interface AppSettings {
   ocr_engine: string;
   paddle_ocr_endpoint: string | null;
+  paddle_ocr_api_key_masked: string | null;
+  has_paddle_ocr_api_key: boolean;
   baidu_ocr_api_key_masked: string | null;
   has_baidu_ocr_api_key: boolean;
   baidu_ocr_secret_key_masked: string | null;
@@ -68,6 +70,7 @@ export interface AppSettings {
 export interface AppSettingsUpdateRequest {
   ocr_engine?: string;
   paddle_ocr_endpoint?: string;
+  paddle_ocr_api_key?: string;
   baidu_ocr_api_key?: string;
   baidu_ocr_secret_key?: string;
   mcp_enabled?: boolean;

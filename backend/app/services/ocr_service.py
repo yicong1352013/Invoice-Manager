@@ -365,23 +365,41 @@ class RemotePaddleOCRService(OCRService):
     "fileType": 1}``. If the deployment answers 4xx to that body (plain
     PaddleX pipeline serving expects a multipart file upload instead), the
     request is retried once as multipart and the working style remembered.
+
+    When api_key is configured it is sent on every request as both
+    ``Authorization: Bearer <key>`` and ``X-API-Key: <key>`` — the two
+    header conventions a reverse proxy in front of the service commonly
+    checks; the naked service ignores unknown headers.
     """
 
-    def __init__(self, endpoint: str, timeout: float = 120.0):
+    def __init__(self, endpoint: str, api_key: Optional[str] = None, timeout: float = 120.0):
         super().__init__()
         self.endpoint = endpoint.strip().rstrip("/")
+        self.api_key = (api_key or "").strip() or None
         self.timeout = timeout
         self._multipart_mode = False  # remembers the contract that worked
+
+    def _auth_headers(self) -> Dict[str, str]:
+        if not self.api_key:
+            return {}
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "X-API-Key": self.api_key,
+        }
 
     def _post(self, image_bytes: bytes):
         import httpx
 
+        headers = self._auth_headers()
         if self._multipart_mode:
-            return httpx.post(self.endpoint, files={"file": image_bytes}, timeout=self.timeout)
+            return httpx.post(
+                self.endpoint, files={"file": image_bytes}, headers=headers, timeout=self.timeout
+            )
         b64 = base64.b64encode(image_bytes).decode("utf-8")
         return httpx.post(
             self.endpoint,
             json={"file": b64, "fileType": 1},
+            headers=headers,
             timeout=self.timeout,
         )
 

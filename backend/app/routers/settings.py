@@ -31,6 +31,7 @@ from app.models.provider import (
     SETTING_MCP_ENABLED,
     SETTING_MCP_TOKEN,
     SETTING_OCR_ENGINE,
+    SETTING_PADDLE_OCR_API_KEY,
     SETTING_PADDLE_OCR_ENDPOINT,
 )
 from app.services.model_registry import get_models_with_fallback
@@ -130,6 +131,8 @@ class LLMStatusResponse(BaseModel):
 class AppSettingsOut(BaseModel):
     ocr_engine: str
     paddle_ocr_endpoint: Optional[str] = None
+    paddle_ocr_api_key_masked: Optional[str] = None
+    has_paddle_ocr_api_key: bool = False
     baidu_ocr_api_key_masked: Optional[str] = None
     has_baidu_ocr_api_key: bool = False
     baidu_ocr_secret_key_masked: Optional[str] = None
@@ -142,6 +145,7 @@ class AppSettingsOut(BaseModel):
 class AppSettingsUpdateRequest(BaseModel):
     ocr_engine: Optional[str] = None  # 'local' | 'baidu'
     paddle_ocr_endpoint: Optional[str] = None  # empty string clears back to the in-process engine
+    paddle_ocr_api_key: Optional[str] = None  # empty/None = keep
     baidu_ocr_api_key: Optional[str] = None  # empty/None = keep
     baidu_ocr_secret_key: Optional[str] = None
     mcp_enabled: Optional[bool] = None
@@ -503,9 +507,12 @@ async def get_app_settings(
     baidu_key = await get_setting(db, SETTING_BAIDU_OCR_API_KEY)
     baidu_secret = await get_setting(db, SETTING_BAIDU_OCR_SECRET_KEY)
     mcp_token = await get_setting(db, SETTING_MCP_TOKEN)
+    paddle_key = await get_setting(db, SETTING_PADDLE_OCR_API_KEY)
     return AppSettingsOut(
         ocr_engine=await get_setting(db, SETTING_OCR_ENGINE, "local") or "local",
         paddle_ocr_endpoint=await get_setting(db, SETTING_PADDLE_OCR_ENDPOINT),
+        paddle_ocr_api_key_masked=mask_secret(paddle_key),
+        has_paddle_ocr_api_key=bool(paddle_key),
         baidu_ocr_api_key_masked=mask_secret(baidu_key),
         has_baidu_ocr_api_key=bool(baidu_key),
         baidu_ocr_secret_key_masked=mask_secret(baidu_secret),
@@ -531,6 +538,8 @@ async def update_app_settings(
         await set_setting(
             db, SETTING_PADDLE_OCR_ENDPOINT, body.paddle_ocr_endpoint.strip() or None
         )
+    if body.paddle_ocr_api_key:
+        await set_setting(db, SETTING_PADDLE_OCR_API_KEY, body.paddle_ocr_api_key.strip())
     if body.baidu_ocr_api_key:
         await set_setting(db, SETTING_BAIDU_OCR_API_KEY, body.baidu_ocr_api_key.strip())
     if body.baidu_ocr_secret_key:

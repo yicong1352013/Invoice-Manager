@@ -76,6 +76,7 @@ def _run_ocr(
     file_data: bytes,
     file_type: str,
     paddle_endpoint: Optional[str] = None,
+    paddle_api_key: Optional[str] = None,
 ) -> OcrOutcome:
     """Run the selected OCR engine in a worker thread."""
     if engine == "baidu":
@@ -92,7 +93,7 @@ def _run_ocr(
     from app.services.ocr_service import RemotePaddleOCRService
     if paddle_endpoint:
         # custom PaddleOCR HTTP service instead of the in-process engine
-        ocr_service = RemotePaddleOCRService(paddle_endpoint)
+        ocr_service = RemotePaddleOCRService(paddle_endpoint, api_key=paddle_api_key)
         engine_name = "paddle_remote"
     else:
         ocr_service = get_ocr_service()
@@ -214,6 +215,7 @@ async def process_invoice(invoice_id: int, db: AsyncSession) -> bool:
         SETTING_BAIDU_OCR_API_KEY,
         SETTING_BAIDU_OCR_SECRET_KEY,
         SETTING_OCR_ENGINE,
+        SETTING_PADDLE_OCR_API_KEY,
         SETTING_PADDLE_OCR_ENDPOINT,
     )
     from app.services.provider_service import get_setting
@@ -239,6 +241,7 @@ async def process_invoice(invoice_id: int, db: AsyncSession) -> bool:
         baidu_key = await get_setting(db, SETTING_BAIDU_OCR_API_KEY)
         baidu_secret = await get_setting(db, SETTING_BAIDU_OCR_SECRET_KEY)
         paddle_endpoint = await get_setting(db, SETTING_PADDLE_OCR_ENDPOINT)
+        paddle_api_key = await get_setting(db, SETTING_PADDLE_OCR_API_KEY)
         llm_service = LLMService(await get_active_provider_row(db))
 
         loop = asyncio.get_running_loop()
@@ -246,7 +249,7 @@ async def process_invoice(invoice_id: int, db: AsyncSession) -> bool:
         # Step 1: OCR (CPU-bound pool)
         outcome = await loop.run_in_executor(
             _ocr_executor, _run_ocr, engine, baidu_key, baidu_secret,
-            invoice.file_data, invoice.file_type, paddle_endpoint,
+            invoice.file_data, invoice.file_type, paddle_endpoint, paddle_api_key,
         )
         logger.info(
             f"OCR ({outcome.engine}) completed: {len(outcome.fields)} fields, "

@@ -86,6 +86,7 @@ export default function SettingsPage({ currentUser }: SettingsPageProps) {
       ocrForm.setFieldsValue({
         ocr_engine: data.ocr_engine,
         paddle_ocr_endpoint: data.paddle_ocr_endpoint ?? '',
+        paddle_ocr_api_key: '',
         baidu_ocr_api_key: '',
         baidu_ocr_secret_key: '',
       });
@@ -231,6 +232,7 @@ export default function SettingsPage({ currentUser }: SettingsPageProps) {
   const handleSaveOcr = async (values: {
     ocr_engine: string;
     paddle_ocr_endpoint?: string;
+    paddle_ocr_api_key?: string;
     baidu_ocr_api_key?: string;
     baidu_ocr_secret_key?: string;
   }) => {
@@ -240,6 +242,7 @@ export default function SettingsPage({ currentUser }: SettingsPageProps) {
         ocr_engine: values.ocr_engine,
         // endpoint is not a secret: always send so clearing works (empty = 内置引擎)
         paddle_ocr_endpoint: values.paddle_ocr_endpoint ?? '',
+        paddle_ocr_api_key: values.paddle_ocr_api_key || undefined,
         baidu_ocr_api_key: values.baidu_ocr_api_key || undefined,
         baidu_ocr_secret_key: values.baidu_ocr_secret_key || undefined,
       });
@@ -416,7 +419,14 @@ export default function SettingsPage({ currentUser }: SettingsPageProps) {
               label="PaddleOCR 自定义服务地址（可选）"
               extra="选择本地引擎时生效：填写 PaddleX 服务地址（如 http://192.168.66.32:8080/ocr，AIStudio 风格 JSON 接口），自动兼容官方上传式产线接口；留空使用内置本地引擎"
             >
-              <Input placeholder="如 http://192.168.1.10:9300/ocr（留空使用内置引擎）" />
+              <Input placeholder="如 http://192.168.66.32:8080/ocr（留空使用内置引擎）" />
+            </Form.Item>
+            <Form.Item
+              name="paddle_ocr_api_key"
+              label={`PaddleOCR 服务 API Key${appSettings?.has_paddle_ocr_api_key ? `（已配置 ${appSettings.paddle_ocr_api_key_masked}，留空保持不变）` : '（可选，反向代理开启鉴权时填写）'}`}
+              extra="填写后请求自动携带 Authorization: Bearer 与 X-API-Key 两种请求头，适配常见 Nginx API Key 校验"
+            >
+              <Input.Password placeholder="反向代理的 API Key" autoComplete="new-password" />
             </Form.Item>
             <div className={styles.twoColumns}>
               <Form.Item
