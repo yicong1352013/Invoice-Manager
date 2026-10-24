@@ -9,6 +9,10 @@ Business invariants:
 """
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+
+import asyncio
+import pytest
 
 from app.services.baidu_ocr_service import map_vat_invoice_fields
 from app.services.invoice_service import (
@@ -74,6 +78,43 @@ def test_critical_fields_match_status_logic_set():
     assert 'invoice_number' in CRITICAL_FIELDS
     assert 'total_with_tax' in CRITICAL_FIELDS
     assert len(CRITICAL_FIELDS) == 8
+
+
+@pytest.mark.parametrize('overrides', [
+    {'item_name': '8 4 5 3 3 < 7'},
+    {'item_name': '12345678'},
+    {'tax_rate': None},
+])
+def test_invalid_item_or_unread_tax_column_cannot_skip_review(overrides):
+    outcome = OcrOutcome(engine='paddle_remote', raw_text='电子发票\n税率\n税额\n3%',
+                         confidence=98.0, fields=_complete_fields(**overrides))
+    assert not _ocr_sufficient(outcome, accept_confidence=85.0)
+
+
+@pytest.mark.parametrize('overrides, expected_status', [
+    ({'item_name': '8 4 5 3 3 < 7'}, '待审核'),
+    ({'tax_rate': None}, '待审核'),
+    ({}, '已确认'),
+])
+def test_processing_uses_field_validity_for_final_status_without_llm(monkeypatch, overrides, expected_status):
+    import app.services.invoice_service as svc
+
+    invoice = SimpleNamespace(id=1, file_data=b'pdf', file_type='pdf')
+    db = SimpleNamespace(
+        execute=AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: invoice)),
+        add=Mock(), commit=AsyncMock(), rollback=AsyncMock(),
+    )
+    outcome = OcrOutcome(engine='paddle_remote', raw_text='电子发票\n税率\n税额\n3%',
+                         confidence=98.0, fields=_complete_fields(**overrides))
+    monkeypatch.setattr(svc, '_run_ocr', lambda *args: outcome)
+    monkeypatch.setattr(svc, 'get_active_provider_row', AsyncMock(return_value=None))
+    monkeypatch.setattr('app.services.provider_service.get_setting', AsyncMock(return_value=None))
+    monkeypatch.setattr(svc, 'LLMService', lambda _: _FakeLLM(available=False))
+
+    assert asyncio.run(svc.process_invoice(1, db))
+    assert invoice.status.value == expected_status
+    db.commit.assert_awaited_once()
+    db.rollback.assert_not_awaited()
 
 
 # --- LLM fallback path selection ---------------------------------------------

@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List, Tuple
@@ -9,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 
 from app.models.invoice import Invoice, OcrResult, LlmResult, ParsingDiff, InvoiceStatus
-from app.services.ocr_service import get_ocr_service, get_field_extractor
+from app.services.ocr_service import get_ocr_service, get_field_extractor, is_valid_item_name
 from app.services.llm_service import LLMService
 from app.services.provider_service import get_active_provider_row
 from app.config import get_settings
@@ -109,13 +110,22 @@ def _run_ocr(
                       fields=fields, raw_response=raw_response)
 
 
+def _fields_needing_review(fields: Dict[str, Any], raw_text: str) -> List[str]:
+    review_fields = [name for name in CRITICAL_FIELDS if not str(fields.get(name) or '').strip()]
+    if fields.get('item_name') and not is_valid_item_name(fields['item_name']):
+        review_fields.append('item_name')
+    if re.search(r'税\s*率|征收率', raw_text) and not str(fields.get('tax_rate') or '').strip():
+        review_fields.append('tax_rate')
+    return review_fields
+
+
 def _ocr_sufficient(outcome: OcrOutcome, accept_confidence: float) -> bool:
     """OCR-first gate: complete critical fields + acceptable confidence.
 
     Engines without a confidence score (Baidu structured API) are judged by
     field completeness alone.
     """
-    if any(not outcome.fields.get(name) for name in CRITICAL_FIELDS):
+    if _fields_needing_review(outcome.fields, outcome.raw_text):
         return False
     if outcome.confidence is None:
         return True
@@ -334,12 +344,11 @@ async def process_invoice(invoice_id: int, db: AsyncSession) -> bool:
 
         # Set status based on whether review is needed (unchanged semantics)
         has_conflicts = any(d['needs_review'] for d in diffs)
-        missing_fields = [f for f in CRITICAL_FIELDS if not final_fields.get(f)]
-        missing_critical = bool(missing_fields)
-        if missing_critical:
-            logger.warning(f"Invoice {invoice_id} missing critical fields: {missing_fields}")
+        review_fields = _fields_needing_review(final_fields, outcome.raw_text)
+        if review_fields:
+            logger.warning(f"Invoice {invoice_id} fields requiring review: {review_fields}")
 
-        needs_review = has_conflicts or missing_critical
+        needs_review = has_conflicts or bool(review_fields)
         if needs_review:
             invoice.status = InvoiceStatus.REVIEWING
         else:

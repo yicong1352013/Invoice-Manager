@@ -20,9 +20,10 @@ Business invariants:
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from app.services.ocr_service import (
-    OCRService, RemotePaddleOCRService, parse_remote_paddle_pages,
+    FieldExtractor, OCRService, RemotePaddleOCRService, parse_remote_paddle_pages,
     parse_remote_paddle_response,
 )
 
@@ -48,6 +49,36 @@ AISTUDIO_PAYLOAD = {
         "dataInfo": {"width": 700, "height": 160, "type": "image"},
     },
 }
+
+
+@pytest.mark.parametrize('cipher', [
+    '// -9 7 < > 1 + < 2 4 6 6 3 < 4 9 - 7* 8 4 5 3 3 < 7',
+    '0 3 6 8 */ 6 2 1 7 + 4 1 > 6 1 4 < 9 < 8 + / 9 / 6 > /',
+    '/ < / 3 - 7 1 < 5 < 7 9 2 > 5 > 7 - 2 4 1 * + - 3 8 > *',
+])
+def test_remote_pdf_cipher_never_becomes_item_and_tax_column_is_extracted(monkeypatch, cipher):
+    texts = ['电子普通发票', cipher, '项目名称', '金额', '税率', '税额',
+             '*经营租赁*通行费', '20.90', '3%', '0.63']
+    payload = {'errorCode': 0, 'result': {'ocrResults': [_page(texts, [0.98] * len(texts))]}}
+    monkeypatch.setattr('httpx.post', _FakeHttpx([_resp(200, payload)]))
+
+    raw, _, lines, response = RemotePaddleOCRService('http://ocr.test/ocr').process_pdf(b'pdf')
+    fields = FieldExtractor().extract_fields(raw, lines)
+
+    assert fields['item_name'] == '经营租赁*通行费'
+    assert fields['tax_rate'] == '3%'
+    assert cipher in response
+
+
+@pytest.mark.parametrize('rates, expected', [
+    (['1.5%'], '1.5%'),
+    (['免税'], '免税'),
+    (['不征税'], '不征税'),
+    (['3%', '13%'], None),
+])
+def test_separate_tax_column_preserves_rate_or_requires_review_for_multiple_rates(rates, expected):
+    raw = '\n'.join(['电子普通发票', '税率/征收率', '税额', '*服务*测试服务', *rates])
+    assert FieldExtractor().extract_fields(raw)['tax_rate'] == expected
 
 PLAIN_PADDLEX_PAYLOAD = {
     "logId": "x",

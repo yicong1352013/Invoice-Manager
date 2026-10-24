@@ -36,6 +36,13 @@ def strip_cipher_tokens(text: str) -> str:
     cleaned = _CIPHER_TOKEN.sub(_clean, text)
     return re.sub(r"[ \t]{2,}", " ", cleaned).rstrip()
 
+
+def is_valid_item_name(value: Optional[str]) -> bool:
+    """Reject cipher fragments and numeric-only values as invoice item names."""
+    return bool(value) and any(char.isalpha() for char in value) and not any(
+        char in value for char in '<>'
+    )
+
 # Thread lock for singleton initialization
 _ocr_lock = threading.Lock()
 _extractor_lock = threading.Lock()
@@ -569,7 +576,7 @@ class FieldExtractor:
         'total_with_tax': r'(?:小写|价税合计)[）)（(]*\s*[¥￥Y□]?\s*([\d][\d,.]*)',
         'amount': r'(?:合\s*计|金\s*额)\s*[¥￥Y□]?\s*([\d][\d,.]*)',
         'tax_amount': r'(?:税\s*额\s*[¥￥Y□]?\s*([\d,.]+)|[¥￥Y□]\s*[\d,.]+\s*[¥￥Y□]\s*([\d,.]+))',
-        'tax_rate': r'(?:税率[/／征收率]*[：:]?\s*|金额\n)(\d+%?|免税)',
+        'tax_rate': None,  # Table headers and values may be on separate OCR lines
     }
 
     # Regex patterns for English invoice fields
@@ -1070,7 +1077,10 @@ class FieldExtractor:
                 continue
 
             try:
-                match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+                match = next((
+                    candidate for candidate in re.finditer(pattern, text, re.IGNORECASE | re.MULTILINE)
+                    if field_name != 'item_name' or is_valid_item_name(candidate.group(1))
+                ), None)
                 if match:
                     # Handle patterns with multiple capture groups (alternation)
                     # Use the first non-None group
@@ -1093,6 +1103,14 @@ class FieldExtractor:
             fields['buyer_tax_id'] = buyer_seller['buyer_tax_id']
             fields['seller_name'] = buyer_seller['seller_name']
             fields['seller_tax_id'] = buyer_seller['seller_tax_id']
+
+            if re.search(r'税\s*率|征收率', text):
+                rates = {
+                    re.sub(r'\s+', '', value).replace('％', '%')
+                    for value in re.findall(r'(?<![\d.])\d+(?:\.\d+)?[ \t]*[%％]|免税|不征税', text)
+                }
+                # shortcut: 多税率保持待审核，支持逐项明细时再提取各行税率。
+                fields['tax_rate'] = next(iter(rates)) if len(rates) == 1 else None
 
         # Log extraction results for debugging
         logger.info(f"OCR extracted: buyer={fields.get('buyer_name')}, seller={fields.get('seller_name')}")
