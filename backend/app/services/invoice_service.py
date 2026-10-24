@@ -1,6 +1,7 @@
 """Invoice processing service: OCR-first pipeline with LLM fallback."""
 
 import asyncio
+import json
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -13,6 +14,11 @@ from app.models.invoice import Invoice, OcrResult, LlmResult, ParsingDiff, Invoi
 from app.services.ocr_service import get_ocr_service, get_field_extractor, is_valid_item_name
 from app.services.llm_service import LLMService
 from app.services.provider_service import get_active_provider_row
+from app.services.prompts import (
+    INVOICE_VERIFY_OCR_SECTION,
+    INVOICE_VERIFY_PROMPT,
+    INVOICE_VERIFY_SYSTEM_PROMPT,
+)
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -152,6 +158,25 @@ def _run_llm_fallback(
     return llm_service.parse_invoice_from_text(ocr_raw_text)
 
 
+def _pdf_first_page_png(file_data: bytes) -> Optional[bytes]:
+    """Render the first PDF page to PNG bytes (requires poppler); None on failure."""
+    try:
+        from pdf2image import convert_from_bytes
+        from io import BytesIO
+
+        # Use higher DPI (300) for better text recognition in PDFs
+        # Some PDFs have text rendered as graphics which need higher resolution
+        images = convert_from_bytes(file_data, dpi=300, first_page=1, last_page=1)
+        if not images:
+            return None
+        buffer = BytesIO()
+        images[0].save(buffer, format='PNG', optimize=False)
+        return buffer.getvalue()
+    except Exception as e:
+        logger.error(f"PDF to image conversion failed: {e}")
+        return None
+
+
 def _run_llm_vision(llm_service: LLMService, file_data: bytes, file_type: str) -> Dict[str, Any]:
     """Run LLM vision parsing (image input) in a worker thread."""
     if not llm_service.is_available or not llm_service.supports_vision():
@@ -168,26 +193,13 @@ def _run_llm_vision(llm_service: LLMService, file_data: bytes, file_type: str) -
 
     # For PDF, we need to convert first page to image
     if file_type == 'pdf':
-        try:
-            from pdf2image import convert_from_bytes
-            from io import BytesIO
-
-            # Use higher DPI (300) for better text recognition in PDFs
-            # Some PDFs have text rendered as graphics which need higher resolution
-            images = convert_from_bytes(file_data, dpi=300, first_page=1, last_page=1)
-            if images:
-                # Convert PIL Image to bytes with high quality
-                buffer = BytesIO()
-                images[0].save(buffer, format='PNG', optimize=False)
-                file_data = buffer.getvalue()
-                mime_type = 'image/png'
-                logger.info(f"PDF converted to image: {images[0].size[0]}x{images[0].size[1]} pixels, {len(file_data)} bytes")
-            else:
-                logger.warning("Failed to convert PDF to image for LLM vision")
-                return {}
-        except Exception as e:
-            logger.error(f"PDF to image conversion failed: {e}")
+        png = _pdf_first_page_png(file_data)
+        if png is None:
+            logger.warning("Failed to convert PDF to image for LLM vision")
             return {}
+        file_data = png
+        mime_type = 'image/png'
+        logger.info(f"PDF converted to image for LLM vision: {len(file_data)} bytes")
 
     return llm_service.parse_invoice_from_image(file_data, mime_type)
 
@@ -529,3 +541,128 @@ def _update_invoice_from_fields(invoice: Invoice, fields: dict) -> None:
 
     if fields.get('tax_rate'):
         invoice.tax_rate = fields['tax_rate']
+
+
+# --- AI verification (detail-page "AI校验") -----------------------------------
+
+_VERIFY_STATUSES = {"correct", "incorrect", "unsure"}
+
+
+def build_verify_prompt(current_values: Dict[str, Any], ocr_text: Optional[str]) -> str:
+    """Assemble the verification prompt with current values (+ optional OCR text)."""
+    values_json = json.dumps(current_values, ensure_ascii=False, indent=2)
+    ocr_section = ""
+    if ocr_text and ocr_text.strip():
+        ocr_section = INVOICE_VERIFY_OCR_SECTION.replace("{ocr_text}", ocr_text.strip())
+    return (
+        INVOICE_VERIFY_PROMPT
+        .replace("{current_values}", values_json)
+        .replace("{ocr_section}", ocr_section)
+    )
+
+
+def parse_verify_response(content: str) -> Dict[str, Any]:
+    """Parse + normalize the LLM verification verdict.
+
+    Invariants:
+    - Only known field names (COMPARABLE_FIELDS) survive; unknown ones are dropped.
+    - Every comparable field gets a verdict; missing entries become 'unsure'.
+    - status is normalized to correct/incorrect/unsure; anything else is 'unsure'.
+    - corrected_value is kept only for 'incorrect' verdicts with a non-empty value.
+    - overall is recomputed from the verdicts, never trusted from the model.
+    """
+    if content.startswith("```"):
+        content = content.split("```")[1]
+        if content.startswith("json"):
+            content = content[4:]
+        content = content.strip()
+
+    data = json.loads(content)
+    if not isinstance(data, dict):
+        raise ValueError("AI校验结果不是JSON对象")
+    raw_fields = data.get("fields")
+    if not isinstance(raw_fields, list):
+        raise ValueError("AI校验结果缺少fields数组")
+
+    by_field: Dict[str, Dict[str, Any]] = {}
+    for item in raw_fields:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("field") or "").strip()
+        if name not in COMPARABLE_FIELDS:
+            continue
+        status = str(item.get("status") or "").strip().lower()
+        if status not in _VERIFY_STATUSES:
+            status = "unsure"
+        corrected = item.get("corrected_value")
+        corrected = str(corrected).strip() if corrected is not None else None
+        if status != "incorrect" or not corrected:
+            corrected = None
+        by_field[name] = {
+            "field": name,
+            "status": status,
+            "corrected_value": corrected,
+            "reason": str(item.get("reason") or "").strip() or None,
+        }
+
+    fields = [
+        by_field.get(name, {"field": name, "status": "unsure", "corrected_value": None, "reason": None})
+        for name in COMPARABLE_FIELDS
+    ]
+    overall = "issues" if any(f["status"] != "correct" for f in fields) else "pass"
+    return {
+        "overall": overall,
+        "fields": fields,
+        "summary": str(data.get("summary") or "").strip() or None,
+    }
+
+
+def run_ai_verify(
+    llm_service: LLMService,
+    current_values: Dict[str, Any],
+    ocr_text: Optional[str],
+    file_data: bytes,
+    file_type: str,
+) -> Dict[str, Any]:
+    """One AI verification run (worker thread).
+
+    Vision-capable providers read the original image (PDFs need a poppler
+    render; when unavailable the call degrades to the OCR text). Returns
+    {"mode", "content", "verdict"}; raises ValueError when there is nothing
+    to verify from and RuntimeError when the LLM call or parsing fails.
+    """
+    mime_map = {'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png'}
+    image_data: Optional[bytes] = None
+    mime_type = 'image/png'
+
+    if llm_service.supports_vision():
+        if file_type in mime_map:
+            image_data = file_data
+            mime_type = mime_map[file_type]
+        elif file_type == 'pdf':
+            png = _pdf_first_page_png(file_data)
+            if png is not None:
+                image_data = png
+            else:
+                logger.warning("AI verify: PDF→image conversion unavailable, falling back to OCR text")
+
+    if image_data is None and not (ocr_text and ocr_text.strip()):
+        raise ValueError("无原件图片且无OCR识别文本，无法进行AI校验")
+
+    prompt = build_verify_prompt(current_values, ocr_text)
+    try:
+        content = llm_service.verify_completion(
+            INVOICE_VERIFY_SYSTEM_PROMPT, prompt, image_data, mime_type)
+    except Exception as e:
+        raise RuntimeError(f"LLM调用失败: {e}") from e
+
+    try:
+        verdict = parse_verify_response(content)
+    except ValueError as e:
+        raise RuntimeError(f"AI返回内容无法解析: {e}") from e
+
+    return {
+        "mode": "vision" if image_data is not None else "text",
+        "content": content,
+        "verdict": verdict,
+    }

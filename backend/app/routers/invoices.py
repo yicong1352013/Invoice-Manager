@@ -5,19 +5,19 @@ import logging
 from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException, Query, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 from decimal import Decimal
 
 from app.database import get_db
 from app.auth import can_access_invoice, get_current_user
-from app.models.invoice import Invoice, OcrResult, LlmResult, ParsingDiff, InvoiceStatus
+from app.models.invoice import Invoice, OcrResult, LlmResult, ParsingDiff, AiVerification, InvoiceStatus
 from app.models.user import User, UserRole
 from app.models.attachment import ATTACHMENT_EXTENSIONS, Attachment, AttachmentCategory
 from app.schemas.attachment import AttachmentOut, AttachmentUploadResult, AttachmentUpdateRequest
 from app.schemas.invoice import (
     InvoiceResponse, InvoiceListResponse, InvoiceDetailResponse,
     InvoiceUpdate, BatchUpdateRequest, BatchDeleteRequest, StatisticsResponse, UploadResponse,
-    ResolveDiffRequest
+    ResolveDiffRequest, AiVerificationResponse
 )
 from app.config import get_settings
 from app.services.audit_service import log_audit, log_audit_no_commit, get_client_info
@@ -429,6 +429,11 @@ async def get_invoice(
     diff_result = await db.execute(diff_query)
     diffs = diff_result.scalars().all()
 
+    verification_result = await db.execute(
+        select(AiVerification).where(AiVerification.invoice_id == invoice_id)
+    )
+    verification = verification_result.scalar_one_or_none()
+
     # Build response dict from invoice to avoid lazy loading issues
     invoice_dict = {
         "id": invoice.id,
@@ -456,6 +461,7 @@ async def get_invoice(
         "ocr_result": ocr,
         "llm_result": llm,
         "parsing_diffs": list(diffs),
+        "ai_verification": verification,
     }
 
     return InvoiceDetailResponse.model_validate(invoice_dict)
@@ -1138,6 +1144,99 @@ async def confirm_invoice(
     await db.commit()
 
     return {"message": "发票已确认", "resolved_count": len(diffs)}
+
+
+@router.post("/{invoice_id}/ai-verify", response_model=AiVerificationResponse)
+@limiter.limit("5/minute")
+async def ai_verify_invoice(
+    invoice_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """AI校验：当前字段值 + OCR识别文本 + 原件发给已启用的LLM逐字段核对。
+
+    结果覆盖式保存（每张发票仅保留最近一次），不改发票业务状态。
+    """
+    import asyncio
+
+    from app.services.invoice_service import COMPARABLE_FIELDS, _llm_executor, run_ai_verify
+    from app.services.llm_service import LLMService
+    from app.services.provider_service import get_active_provider_row
+
+    invoice = await _get_accessible_invoice(invoice_id, current_user, db)
+
+    provider_row = await get_active_provider_row(db)
+    llm_service = LLMService(provider_row)
+    if not llm_service.is_available:
+        raise HTTPException(status_code=409, detail="未配置可用的LLM服务，请先在设置页配置并启用")
+
+    ocr = (await db.execute(
+        select(OcrResult).where(OcrResult.invoice_id == invoice_id)
+    )).scalar_one_or_none()
+
+    def _plain(value):
+        if value is None:
+            return None
+        if hasattr(value, "isoformat"):  # date / Decimal-safe
+            return value.isoformat()
+        return str(value)
+
+    current_values = {name: _plain(getattr(invoice, name)) for name in COMPARABLE_FIELDS}
+
+    loop = asyncio.get_running_loop()
+    try:
+        outcome = await loop.run_in_executor(
+            _llm_executor, run_ai_verify, llm_service, current_values,
+            ocr.raw_text if ocr else None, invoice.file_data, invoice.file_type,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e)[:300])
+
+    verdict = outcome["verdict"]
+    incorrect = sum(1 for f in verdict["fields"] if f["status"] == "incorrect")
+    unsure = sum(1 for f in verdict["fields"] if f["status"] == "unsure")
+
+    # One row per invoice: replace the previous verification
+    await db.execute(delete(AiVerification).where(AiVerification.invoice_id == invoice_id))
+    verification = AiVerification(
+        invoice_id=invoice_id,
+        overall=verdict["overall"],
+        summary=verdict["summary"],
+        fields=verdict["fields"],
+        mode=outcome["mode"],
+        provider_name=provider_row.display_name or provider_row.name,
+        model=provider_row.model,
+        raw_response=outcome["content"],
+    )
+    db.add(verification)
+
+    client_info = get_client_info(request)
+    await log_audit_no_commit(
+        db=db,
+        entity_type="invoice",
+        entity_id=invoice_id,
+        action="ai_verify",
+        user_id=current_user.username,
+        new_value={
+            "overall": verdict["overall"],
+            "incorrect": incorrect,
+            "unsure": unsure,
+            "mode": outcome["mode"],
+            "provider": verification.provider_name,
+            "model": verification.model,
+        },
+        ip_address=client_info.get("ip_address"),
+        user_agent=client_info.get("user_agent"),
+        details=f"AI校验: {'通过' if verdict['overall'] == 'pass' else '发现问题'}"
+                f"（不符 {incorrect} 项 / 存疑 {unsure} 项，{'原件图片' if outcome['mode'] == 'vision' else 'OCR文本'}）",
+    )
+
+    await db.commit()
+    await db.refresh(verification)
+    return AiVerificationResponse.model_validate(verification)
 
 
 @router.get("/export/csv")

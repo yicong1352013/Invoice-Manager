@@ -127,10 +127,27 @@ class ParsingDiffResponse(BaseModel):
         from_attributes = True
 
 
+class AiVerificationResponse(BaseModel):
+    id: int
+    invoice_id: int
+    overall: str                          # 'pass' | 'issues'
+    summary: Optional[str] = None
+    fields: Optional[List[dict]] = None   # [{field, status, corrected_value, reason}]
+    mode: str                             # 'vision' | 'text'
+    provider_name: Optional[str] = None
+    model: Optional[str] = None
+    raw_response: Optional[str] = None    # verbatim LLM output
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 class InvoiceDetailResponse(InvoiceResponse):
     ocr_result: Optional[OcrResultResponse] = None
     llm_result: Optional[LlmResultResponse] = None
     parsing_diffs: List[ParsingDiffResponse] = []
+    ai_verification: Optional[AiVerificationResponse] = None
 
 
 class BatchUpdateRequest(BaseModel):

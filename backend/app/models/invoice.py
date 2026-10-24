@@ -3,7 +3,7 @@ from decimal import Decimal
 from enum import Enum
 from sqlalchemy import (
     Column, Integer, String, DateTime, Date, Numeric,
-    Text, LargeBinary, ForeignKey, Enum as SQLEnum
+    Text, LargeBinary, ForeignKey, Enum as SQLEnum, JSON
 )
 from sqlalchemy.orm import relationship
 
@@ -68,6 +68,7 @@ class Invoice(Base):
     llm_result = relationship("LlmResult", back_populates="invoice", uselist=False, cascade="all, delete-orphan")
     parsing_diffs = relationship("ParsingDiff", back_populates="invoice", cascade="all, delete-orphan")
     attachments = relationship("Attachment", back_populates="invoice", cascade="all, delete-orphan")
+    ai_verification = relationship("AiVerification", back_populates="invoice", uselist=False, cascade="all, delete-orphan")
 
 
 class OcrResult(Base):
@@ -147,3 +148,27 @@ class ParsingDiff(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     invoice = relationship("Invoice", back_populates="parsing_diffs")
+
+
+class AiVerification(Base):
+    """Latest AI verification verdict for an invoice (one row per invoice).
+
+    Written by the detail-page "AI校验" action: the CURRENT field values
+    (including manual edits) plus the original file / OCR text are sent to the
+    active LLM, which returns per-field verdicts. Re-running replaces the row.
+    """
+    __tablename__ = "ai_verifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    invoice_id = Column(Integer, ForeignKey("invoices.id"), nullable=False, unique=True)
+
+    overall = Column(String(20), nullable=False)  # 'pass' | 'issues'
+    summary = Column(Text, nullable=True)         # AI one-line conclusion
+    fields = Column(JSON, nullable=True)          # [{field, status, corrected_value, reason}]
+    mode = Column(String(10), nullable=False)     # 'vision' | 'text'
+    provider_name = Column(String(100), nullable=True)
+    model = Column(String(200), nullable=True)
+    raw_response = Column(Text, nullable=True)    # verbatim LLM output
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    invoice = relationship("Invoice", back_populates="ai_verification")

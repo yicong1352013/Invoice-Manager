@@ -173,3 +173,68 @@ OCR文本常见噪音：数字被拆分、标签与值分离、混入表格线�
 推断，不要猜测不存在的值，无法确定的字段返回null。
 
 请直接返回JSON对象："""
+
+# AI verification (detail-page "AI校验"): re-check the CURRENT stored field
+# values (which may include manual edits) against the original invoice.
+# The verified set is invoice_service.COMPARABLE_FIELDS.
+VERIFY_FIELD_LABELS = {
+    "invoice_number": "发票号码（8-20位数字）",
+    "issue_date": "开票日期（YYYY-MM-DD）",
+    "buyer_name": "购买方名称（公司全称）",
+    "buyer_tax_id": "购买方纳税人识别号（15-20位字母数字）",
+    "seller_name": "销售方名称（公司全称）",
+    "seller_tax_id": "销售方纳税人识别号（15-20位字母数字）",
+    "item_name": "项目名称/货物名称（可含*分类*前缀）",
+    "total_with_tax": "价税合计（纯数字，不含货币符号）",
+    "amount": "金额，不含税（纯数字）",
+    "tax_amount": "税额（纯数字，免税发票为0）",
+    "tax_rate": "税率（如9%、免税）",
+}
+
+INVOICE_VERIFY_SYSTEM_PROMPT = """你是一个专业的中国发票审核助手。
+你会拿到发票的当前录入字段值，以及发票原件（图片或OCR识别文本）。
+你的任务是逐字段核对录入值与原件内容是否一致。
+你必须严格按照JSON格式返回结果，不要包含任何其他文字、解释或markdown代码块标记。"""
+
+_verify_field_list = json.dumps(
+    VERIFY_FIELD_LABELS, ensure_ascii=False, indent=2
+)
+
+INVOICE_VERIFY_PROMPT = f"""请审核以下中国发票的当前录入字段值。
+
+## 当前录入字段值（待审核，null表示未录入）
+
+{{current_values}}
+
+字段含义说明：
+{_verify_field_list}
+{{ocr_section}}
+## 审核要求
+
+逐字段核对"当前录入字段值"与发票原件（图片，或下方OCR识别文本）：
+- "correct"：录入值与原件一致
+- "incorrect"：录入值与原件不一致或原件有值而录入缺失，必须给出 corrected_value（从原件读出的正确值，格式与录入规范一致：日期YYYY-MM-DD、金额纯数字不含货币符号、税率如"9%"或"免税"）
+- "unsure"：原件上无法确认该字段（原件没有该信息或不可辨认），corrected_value 为 null
+
+注意：密码区乱码、印章文字不是任何字段的内容，不要据此判错。
+
+## 输出格式要求（必须严格遵守）
+
+返回一个JSON对象：
+{{
+  "overall": "pass 或 issues（任一字段为 incorrect 或 unsure 即为 issues）",
+  "fields": [
+    {{"field": "字段名", "status": "correct|incorrect|unsure", "corrected_value": "字符串或null", "reason": "简要说明（30字内）"}}
+  ],
+  "summary": "一句话审核结论（50字内）"
+}}
+
+fields 数组必须逐一覆盖上面"当前录入字段值"中列出的每个字段名，不能多也不能少。
+corrected_value 仅在 status 为 incorrect 时非null。
+只返回JSON对象："""
+
+INVOICE_VERIFY_OCR_SECTION = """
+## 发票OCR识别文本（辅助参考，行序可能打乱、含噪声）
+
+{ocr_text}
+"""

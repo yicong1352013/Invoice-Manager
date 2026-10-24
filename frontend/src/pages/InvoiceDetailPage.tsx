@@ -20,6 +20,7 @@ import {
   FullscreenOutlined,
   PaperClipOutlined,
   PrinterOutlined,
+  RobotOutlined,
   SaveOutlined,
   SyncOutlined,
   CheckCircleOutlined,
@@ -27,10 +28,12 @@ import {
   DownloadOutlined,
 } from '@ant-design/icons';
 import {
+  aiVerifyInvoice,
   deleteAttachment,
   getAttachmentFileUrl,
   getInvoice,
   getInvoiceFileUrl,
+  getLLMStatus,
   getToken,
   listAttachments,
   resolveDiff,
@@ -41,8 +44,9 @@ import {
 } from '../services/api';
 import type { Attachment, AttachmentCategory } from '../types/attachment';
 import { ATTACHMENT_CATEGORY_LABELS } from '../types/attachment';
-import type { InvoiceDetail } from '../types/invoice';
+import type { AiVerificationField, InvoiceDetail } from '../types/invoice';
 import { InvoiceStatus } from '../types/invoice';
+import { formatBackendTime } from '../utils/time';
 import StatusTag from '../components/StatusTag';
 import styles from './InvoiceDetailPage.module.css';
 
@@ -94,6 +98,9 @@ function InvoiceDetailPage() {
   const [attachmentCategory, setAttachmentCategory] = useState<AttachmentCategory>('other');
   const [attachmentModalOpen, setAttachmentModalOpen] = useState(false);
   const [previewFullscreen, setPreviewFullscreen] = useState(false);
+  const [llmConfigured, setLlmConfigured] = useState(false);
+  const [aiVerifying, setAiVerifying] = useState(false);
+  const [applyingFix, setApplyingFix] = useState<string | null>(null);
 
   const fetchAttachments = async () => {
     if (!id) return;
@@ -167,6 +174,9 @@ function InvoiceDetailPage() {
   useEffect(() => {
     fetchInvoice();
     fetchAttachments();
+    getLLMStatus()
+      .then((status) => setLlmConfigured(Boolean(status.is_configured)))
+      .catch(() => setLlmConfigured(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
@@ -262,6 +272,51 @@ function InvoiceDetailPage() {
     }
   };
 
+  const handleAiVerify = async () => {
+    if (!id) return;
+    setAiVerifying(true);
+    const hideLoading = message.loading('AI校验中，可能需要数十秒…', 0);
+    try {
+      const result = await aiVerifyInvoice(parseInt(id));
+      message.success(
+        result.overall === 'pass'
+          ? 'AI校验通过：各字段与原件一致'
+          : 'AI校验完成：发现待确认问题，请查看下方结果'
+      );
+      await fetchInvoice();
+    } catch (error: unknown) {
+      if (error && typeof error === 'object' && 'response' in error) {
+        const axiosError = error as { response?: { data?: { detail?: string } } };
+        if (axiosError.response?.data?.detail) {
+          message.error(axiosError.response.data.detail);
+          return;
+        }
+      }
+      message.error('AI校验失败');
+    } finally {
+      hideLoading();
+      setAiVerifying(false);
+    }
+  };
+
+  const handleApplyAiFixes = async (fieldsToApply: AiVerificationField[]) => {
+    if (!id || !invoice || fieldsToApply.length === 0) return;
+    setApplyingFix(fieldsToApply.length > 1 ? 'all' : fieldsToApply[0].field);
+    try {
+      const updates: Record<string, string> = {};
+      for (const f of fieldsToApply) {
+        updates[f.field] = f.corrected_value!;
+      }
+      await updateInvoice(parseInt(id), updates as Partial<InvoiceDetail>);
+      message.success(`已应用 ${fieldsToApply.length} 项AI修正`);
+      await fetchInvoice();
+    } catch {
+      message.error('应用AI修正失败');
+    } finally {
+      setApplyingFix(null);
+    }
+  };
+
   const handleCustomValueSubmit = async () => {
     if (customValueModal.diffId) {
       await handleResolveDiff(customValueModal.diffId, 'custom', customValue);
@@ -289,6 +344,11 @@ function InvoiceDetailPage() {
   // Calculate match count for comparison header
   const matchCount = invoice.parsing_diffs?.filter(d => d.resolved).length || 0;
   const totalCount = invoice.parsing_diffs?.length || 0;
+
+  // AI verification: fields flagged incorrect with an applicable correction
+  const aiFixableFields = (invoice.ai_verification?.fields ?? []).filter(
+    (f) => f.status === 'incorrect' && f.corrected_value
+  );
 
   return (
     <div className={styles.pageContainer}>
@@ -494,6 +554,18 @@ function InvoiceDetailPage() {
                 )}
               </div>
               <div className={styles.cardActions}>
+                {llmConfigured && (
+                  <Button
+                    type="primary"
+                    ghost
+                    icon={<RobotOutlined />}
+                    onClick={handleAiVerify}
+                    loading={aiVerifying}
+                    size="small"
+                  >
+                    AI校验
+                  </Button>
+                )}
                 <Button
                   icon={<SyncOutlined spin={reprocessing} />}
                   onClick={handleReprocess}
@@ -609,6 +681,127 @@ function InvoiceDetailPage() {
             </div>
             </Spin>
           </div>
+
+          {/* AI Verification Result */}
+          {invoice.ai_verification && (
+            <div className={styles.card}>
+              <div className={styles.cardHeader}>
+                <div className={styles.cardTitle}>
+                  AI校验结果
+                  {invoice.ai_verification.overall === 'pass' ? (
+                    <StatusTag status="success">校验通过</StatusTag>
+                  ) : (
+                    <StatusTag status="warning">发现问题</StatusTag>
+                  )}
+                </div>
+                <div className={styles.cardActions}>
+                  {aiFixableFields.length > 0 && (
+                    <Button
+                      type="primary"
+                      size="small"
+                      icon={<CheckCircleOutlined />}
+                      loading={applyingFix === 'all'}
+                      onClick={() => handleApplyAiFixes(aiFixableFields)}
+                    >
+                      一键应用修正（{aiFixableFields.length}）
+                    </Button>
+                  )}
+                  {llmConfigured && (
+                    <Button
+                      icon={<RobotOutlined />}
+                      onClick={handleAiVerify}
+                      loading={aiVerifying}
+                      size="small"
+                    >
+                      重新校验
+                    </Button>
+                  )}
+                </div>
+              </div>
+              <div className={styles.cardBody}>
+                <div className={styles.comparisonHeader}>
+                  <span className={styles.matchStatus}>
+                    {invoice.ai_verification.provider_name}
+                    {invoice.ai_verification.model ? ` · ${invoice.ai_verification.model}` : ''}
+                    {' · '}
+                    {formatBackendTime(invoice.ai_verification.created_at, 'YYYY-MM-DD HH:mm')}
+                    {' · '}
+                    {invoice.ai_verification.mode === 'vision' ? '原件图片' : 'OCR文本'}
+                  </span>
+                </div>
+                {invoice.ai_verification.summary && (
+                  <div className={styles.infoAlert} style={{ marginBottom: 12 }}>
+                    {invoice.ai_verification.summary}
+                  </div>
+                )}
+                <table className={styles.comparisonTable}>
+                  <thead>
+                    <tr>
+                      <th style={{ width: '18%' }}>字段</th>
+                      <th style={{ width: '23%' }}>当前值</th>
+                      <th style={{ width: '23%' }}>AI建议值</th>
+                      <th style={{ width: '10%' }}>结论</th>
+                      <th style={{ width: '26%' }}>说明</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(invoice.ai_verification.fields ?? []).map((f) => {
+                      const currentValue = invoice[f.field as keyof InvoiceDetail];
+                      const display = currentValue === null || currentValue === undefined
+                        ? '-'
+                        : String(currentValue);
+                      return (
+                        <tr
+                          key={f.field}
+                          className={f.status === 'incorrect' ? styles.mismatch : undefined}
+                        >
+                          <td className={styles.fieldCell}>
+                            {fieldLabels[f.field] || f.field}
+                          </td>
+                          <td>{display}</td>
+                          <td>{f.corrected_value || '-'}</td>
+                          <td>
+                            {f.status === 'correct' && <StatusTag status="success">正确</StatusTag>}
+                            {f.status === 'incorrect' && <StatusTag status="error">不符</StatusTag>}
+                            {f.status === 'unsure' && <StatusTag status="warning">存疑</StatusTag>}
+                          </td>
+                          <td>
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                              {f.reason || '-'}
+                              {f.corrected_value && (
+                                <Button
+                                  type="link"
+                                  size="small"
+                                  loading={applyingFix === f.field}
+                                  onClick={() => handleApplyAiFixes([f])}
+                                >
+                                  应用
+                                </Button>
+                              )}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                {invoice.ai_verification.raw_response && (
+                  <Collapse
+                    style={{ marginTop: 12 }}
+                    items={[{
+                      key: 'ai-raw',
+                      label: 'AI原始返回（未处理）',
+                      children: (
+                        <pre className={styles.rawPre}>
+                          {formatRawResponse(invoice.ai_verification!.raw_response!)}
+                        </pre>
+                      ),
+                    }]}
+                  />
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Recognition raw text (service verbatim vs cleaned) */}
           {invoice.ocr_result && (invoice.ocr_result.raw_response || invoice.ocr_result.raw_text) && (

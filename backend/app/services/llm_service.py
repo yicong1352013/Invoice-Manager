@@ -442,6 +442,28 @@ class LLMService:
             logger.error(f"LLM text parsing failed ({self._client.get_protocol_name()}): {e}")
             return {}
 
+    def verify_completion(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        image_data: Optional[bytes] = None,
+        mime_type: str = "image/png",
+    ) -> str:
+        """Raw completion for the detail-page AI verification flow.
+
+        Sends the image when one is available (vision), otherwise falls back
+        to a pure text completion. Raises on failure — the caller surfaces
+        the error to the user instead of silently degrading.
+        """
+        if not self.is_available:
+            raise RuntimeError("No LLM provider configured")
+
+        if image_data is not None:
+            if not self._client.supports_vision():
+                raise RuntimeError("当前模型不支持图片输入")
+            return self._client.vision_completion(system_prompt, user_prompt, image_data, mime_type)
+        return self._client.chat_completion(system_prompt, user_prompt)
+
     def _normalize_field_value(self, field_name: str, value: Any) -> Optional[str]:
         """Normalize and validate a single field value."""
         if value is None:

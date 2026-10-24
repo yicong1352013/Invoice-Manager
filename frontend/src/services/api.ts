@@ -6,6 +6,7 @@ import type {
   Statistics,
   UploadResponse,
   ModelsResponse,
+  AiVerification,
 } from '../types/invoice';
 import type {
   AppSettings,
@@ -225,6 +226,12 @@ export const reprocessInvoice = async (
   invoiceId: number
 ): Promise<{ message: string; invoice_id: number }> => {
   const response = await api.post(`/invoices/${invoiceId}/process`);
+  return response.data;
+};
+
+// AI verify: send current fields + OCR text + original file to the LLM
+export const aiVerifyInvoice = async (invoiceId: number): Promise<AiVerification> => {
+  const response = await api.post(`/invoices/${invoiceId}/ai-verify`);
   return response.data;
 };
 

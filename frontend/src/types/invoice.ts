@@ -88,10 +88,31 @@ export interface ParsingDiff {
   resolved: number;
 }
 
+export interface AiVerificationField {
+  field: string;
+  status: 'correct' | 'incorrect' | 'unsure';
+  corrected_value: string | null;
+  reason: string | null;
+}
+
+export interface AiVerification {
+  id: number;
+  invoice_id: number;
+  overall: 'pass' | 'issues';
+  summary: string | null;
+  fields: AiVerificationField[] | null;
+  mode: 'vision' | 'text';
+  provider_name: string | null;
+  model: string | null;
+  raw_response: string | null;
+  created_at: string;
+}
+
 export interface InvoiceDetail extends Invoice {
   ocr_result: (OcrResult & { raw_response?: string | null }) | null;
   llm_result: LlmResult | null;
   parsing_diffs: ParsingDiff[];
+  ai_verification: AiVerification | null;
 }
 
 export interface InvoiceListResponse {
