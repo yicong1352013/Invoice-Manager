@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     jwt_expire_hours: int = 24
     admin_username: str = ""  # Initial admin seeded on first startup
     admin_password: str = ""
+    notification_encryption_key: str = ""
+    public_base_url: str = ""
 
     # LLM Provider Configuration
     # Supported providers: openai, anthropic, google, qwen, deepseek, zhipu

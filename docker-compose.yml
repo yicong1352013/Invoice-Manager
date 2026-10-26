@@ -38,6 +38,24 @@ services:
         condition: service_healthy
     command: uvicorn app.main:app --host 0.0.0.0 --port 18080 --reload
 
+  workflow-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/invoice_db
+      DEBUG: "false"
+    volumes:
+      - ./backend:/app
+      - paddleocr_models:/root/.paddleocr
+    depends_on:
+      backend:
+        condition: service_started
+    command: python -m app.workflow_worker
+    restart: on-failure
+
   frontend:
     build:
       context: ./frontend

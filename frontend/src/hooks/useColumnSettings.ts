@@ -10,6 +10,7 @@ interface ColumnSettings {
 
 const defaultColumnConfigs: ColumnConfig[] = [
   { key: 'invoice_number', title: '发票号码', visible: true },
+  { key: 'invoice_type', title: '发票类型', visible: true },
   { key: 'issue_date', title: '开票日期', visible: true },
   { key: 'buyer_name', title: '购买方', visible: true },
   { key: 'buyer_tax_id', title: '购买方税号', visible: false },
@@ -24,6 +25,7 @@ const defaultColumnConfigs: ColumnConfig[] = [
   { key: 'tax_rate', title: '税率', visible: false },
   { key: 'tax_amount', title: '税额', visible: false },
   { key: 'total_with_tax', title: '价税合计', visible: true },
+  { key: 'remark', title: '备注', visible: false },
   { key: 'status', title: '状态', visible: true },
   { key: 'owner', title: '归属人', visible: true },
   { key: 'file_name', title: '文件名', visible: false },
@@ -34,6 +36,7 @@ const defaultColumnConfigs: ColumnConfig[] = [
 
 const defaultColumnWidths: Record<string, number> = {
   invoice_number: 150,
+  invoice_type: 170,
   issue_date: 120,
   buyer_name: 180,
   buyer_tax_id: 180,
@@ -48,6 +51,7 @@ const defaultColumnWidths: Record<string, number> = {
   tax_rate: 80,
   tax_amount: 120,
   total_with_tax: 120,
+  remark: 200,
   status: 100,
   owner: 100,
   file_name: 150,

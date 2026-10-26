@@ -3,15 +3,15 @@ import ReactDOM from 'react-dom/client'
 import { ConfigProvider } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
 import App from './App'
+import { themeConfig } from './theme'
 
-// Import styles in correct order: variables -> global -> antd overrides
+// Import styles in order: variables -> global (antd is themed via ConfigProvider)
 import './styles/variables.css'
 import './styles/global.css'
-import './styles/antd-overrides.css'
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <ConfigProvider locale={zhCN}>
+    <ConfigProvider locale={zhCN} theme={themeConfig}>
       <App />
     </ConfigProvider>
   </React.StrictMode>,

@@ -31,7 +31,7 @@
 }
 
 .totalText {
-  font-family: var(--font-secondary);
+  font-family: var(--font-sans);
   font-size: var(--font-size-sm);
   color: var(--muted-foreground);
   white-space: nowrap;

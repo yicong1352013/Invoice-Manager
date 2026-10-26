@@ -10,6 +10,7 @@ import logging
 import re
 import threading
 from abc import ABC, abstractmethod
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Optional
 
 from app.models.provider import LlmProvider, ProviderProtocol
@@ -482,6 +483,18 @@ class LLMService:
             cleaned = re.sub(r'[¥￥$€,，\s]', '', cleaned)
             match = re.search(r'(\d+(?:\.\d{1,2})?)', cleaned)
             return match.group(1) if match else None
+
+        if field_name in ['quantity', 'unit_price']:
+            cleaned = re.sub(r'[¥￥$€,，\s]', '', cleaned)
+            if not re.fullmatch(r'[+-]?\d+(?:\.\d+)?', cleaned):
+                return None
+            try:
+                number = Decimal(cleaned)
+                if abs(number) >= Decimal('100000000') or number != number.quantize(Decimal('0.0001')):
+                    return None
+            except InvalidOperation:
+                return None
+            return format(number.normalize(), 'f')
 
         if field_name == 'issue_date':
             match = re.search(r'(\d{4})[年/-](\d{1,2})[月/-](\d{1,2})', cleaned)

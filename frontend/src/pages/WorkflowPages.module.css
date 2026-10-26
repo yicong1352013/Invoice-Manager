@@ -1,0 +1,75 @@
+.page {
+  padding: 32px;
+  max-width: 1500px;
+  margin: 0 auto;
+}
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 24px;
+}
+.header h1 {
+  margin: 0 0 8px;
+  font-size: 24px;
+}
+.hint {
+  color: var(--muted-foreground);
+  margin: 0;
+}
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.editor {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 20px;
+}
+.fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.preview {
+  overflow: auto;
+}
+.preview table {
+  border-collapse: collapse;
+  width: 100%;
+}
+.preview td,
+.preview th {
+  padding: 10px;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 20px;
+}
+@media (max-width: 760px) {
+  .page {
+    padding: 16px;
+  }
+  .editor,
+  .grid {
+    grid-template-columns: 1fr;
+  }
+  .page :global(.ant-card-head-wrapper) {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 12px 0;
+  }
+  .page :global(.ant-card-extra) {
+    max-width: 100%;
+    margin-inline-start: 0;
+  }
+  .page :global(.ant-select) {
+    max-width: 100%;
+  }
+}

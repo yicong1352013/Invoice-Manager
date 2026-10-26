@@ -5,7 +5,7 @@ import logging
 from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException, Query, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, delete
+from sqlalchemy import select, func, delete, and_, or_
 from decimal import Decimal
 
 from app.database import get_db
@@ -15,12 +15,17 @@ from app.models.user import User, UserRole
 from app.models.attachment import ATTACHMENT_EXTENSIONS, Attachment, AttachmentCategory
 from app.schemas.attachment import AttachmentOut, AttachmentUploadResult, AttachmentUpdateRequest
 from app.schemas.invoice import (
-    InvoiceResponse, InvoiceListResponse, InvoiceDetailResponse,
+    InvoiceResponse, InvoiceListResponse, InvoiceDetailResponse, InvoiceNavigationResponse,
     InvoiceUpdate, BatchUpdateRequest, BatchDeleteRequest, StatisticsResponse, UploadResponse,
     ResolveDiffRequest, AiVerificationResponse
 )
 from app.config import get_settings
 from app.services.audit_service import log_audit, log_audit_no_commit, get_client_info
+from app.models.workflow import WorkflowRunItem
+from app.services.workflow_upload_service import (
+    prepare_workflow_upload, record_upload_results,
+    prevent_workflow_invoice_deletion, lock_for_manual_reprocess,
+)
 from app.rate_limit import limiter
 
 logger = logging.getLogger(__name__)
@@ -67,6 +72,8 @@ async def upload_invoices(
     request: Request,
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
+    workflow_run_id: Optional[int] = Form(None),
+    client_file_ids: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -74,8 +81,11 @@ async def upload_invoices(
     results = []
     invoice_ids_to_process = []
     client_info = get_client_info(request)
+    run, upload_keys = await prepare_workflow_upload(
+        db, workflow_run_id, current_user, files, client_file_ids, "invoices",
+    )
 
-    for file in files:
+    for file, upload_key in zip(files, upload_keys):
         # Validate file type
         ext = file.filename.split(".")[-1].lower() if file.filename else ""
         if ext not in settings.allowed_extensions:
@@ -89,6 +99,20 @@ async def upload_invoices(
 
         # Read file content
         content = await file.read()
+
+        if run is not None:
+            existing_id = (await db.execute(select(WorkflowRunItem.invoice_id).where(
+                WorkflowRunItem.run_id == run.id, WorkflowRunItem.client_file_id == upload_key,
+            ))).scalar_one_or_none()
+            if existing_id is not None:
+                existing = await db.get(Invoice, existing_id)
+                same = existing is not None and existing.file_name == file.filename and existing.file_data == content
+                results.append(UploadResponse(
+                    id=existing_id if same else 0, file_name=file.filename or "unknown",
+                    status="success" if same else "error",
+                    message="文件已上传" if same else "相同上传标识对应了不同文件",
+                ))
+                continue
 
         # Validate file size
         if len(content) > settings.max_file_size:
@@ -111,6 +135,9 @@ async def upload_invoices(
         db.add(invoice)
         await db.flush()
 
+        if run is not None:
+            db.add(WorkflowRunItem(run_id=run.id, invoice_id=invoice.id, client_file_id=upload_key))
+
         invoice_ids_to_process.append(invoice.id)
 
         # Audit log for upload
@@ -132,10 +159,11 @@ async def upload_invoices(
             message="上传成功，等待解析"
         ))
 
+    record_upload_results(run, upload_keys, results)
     await db.commit()
 
     # Schedule background processing for each uploaded invoice
-    for invoice_id in invoice_ids_to_process:
+    for invoice_id in invoice_ids_to_process if run is None else []:
         background_tasks.add_task(process_invoice_background, invoice_id)
 
     return results
@@ -237,18 +265,7 @@ async def process_invoice_background(invoice_id: int, max_retries: int = 3):
             logger.error(f"Failed to update invoice {invoice_id} status after retry exhaustion: {e}")
 
 
-@router.get("", response_model=InvoiceListResponse)
-async def list_invoices(
-    page: int = Query(1, ge=1, description="页码"),
-    page_size: int = Query(20, ge=1, le=100, description="每页数量"),
-    status: Optional[InvoiceStatus] = Query(None, description="状态筛选"),
-    owner: Optional[str] = Query(None, description="归属人筛选"),
-    start_date: Optional[str] = Query(None, description="开始日期"),
-    end_date: Optional[str] = Query(None, description="结束日期"),
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """获取发票列表（普通用户仅可见自己上传的发票）"""
+def _invoice_list_query(current_user, status=None, owner=None, start_date=None, end_date=None):
     query = select(Invoice)
 
     # Apply filters
@@ -271,13 +288,29 @@ async def list_invoices(
             query = query.where(Invoice.issue_date <= end_date_obj)
         except ValueError:
             pass  # Invalid date format, skip filter
+    return query
+
+
+@router.get("", response_model=InvoiceListResponse)
+async def list_invoices(
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(20, ge=1, le=100, description="每页数量"),
+    status: Optional[InvoiceStatus] = Query(None, description="状态筛选"),
+    owner: Optional[str] = Query(None, description="归属人筛选"),
+    start_date: Optional[str] = Query(None, description="开始日期"),
+    end_date: Optional[str] = Query(None, description="结束日期"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """获取发票列表（普通用户仅可见自己上传的发票）"""
+    query = _invoice_list_query(current_user, status, owner, start_date, end_date)
 
     # Count total
     count_query = select(func.count()).select_from(query.subquery())
     total = await db.scalar(count_query) or 0
 
     # Apply pagination
-    query = query.order_by(Invoice.created_at.desc())
+    query = query.order_by(Invoice.created_at.desc(), Invoice.id.desc())
     query = query.offset((page - 1) * page_size).limit(page_size)
 
     result = await db.execute(query)
@@ -288,6 +321,33 @@ async def list_invoices(
         total=total,
         page=page,
         page_size=page_size
+    )
+
+
+@router.get("/{invoice_id}/navigation", response_model=InvoiceNavigationResponse)
+async def get_invoice_navigation(
+    invoice_id: int,
+    status: Optional[InvoiceStatus] = Query(None, description="状态筛选"),
+    owner: Optional[str] = Query(None, description="归属人筛选"),
+    start_date: Optional[str] = Query(None, description="开始日期"),
+    end_date: Optional[str] = Query(None, description="结束日期"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """按完整筛选结果的位置导航，保存后离开筛选集仍保留当前位置。"""
+    invoice = await _get_accessible_invoice(invoice_id, current_user, db)
+    query = _invoice_list_query(current_user, status, owner, start_date, end_date).with_only_columns(Invoice.id)
+    previous_query = query.where(or_(
+        Invoice.created_at > invoice.created_at,
+        and_(Invoice.created_at == invoice.created_at, Invoice.id > invoice.id),
+    )).order_by(Invoice.created_at.asc(), Invoice.id.asc()).limit(1)
+    next_query = query.where(or_(
+        Invoice.created_at < invoice.created_at,
+        and_(Invoice.created_at == invoice.created_at, Invoice.id < invoice.id),
+    )).order_by(Invoice.created_at.desc(), Invoice.id.desc()).limit(1)
+    return InvoiceNavigationResponse(
+        previous_id=await db.scalar(previous_query),
+        next_id=await db.scalar(next_query),
     )
 
 
@@ -434,35 +494,14 @@ async def get_invoice(
     )
     verification = verification_result.scalar_one_or_none()
 
-    # Build response dict from invoice to avoid lazy loading issues
-    invoice_dict = {
-        "id": invoice.id,
-        "file_name": invoice.file_name,
-        "file_type": invoice.file_type,
-        "status": invoice.status,
-        "owner": invoice.owner,
-        "invoice_number": invoice.invoice_number,
-        "issue_date": invoice.issue_date,
-        "buyer_name": invoice.buyer_name,
-        "buyer_tax_id": invoice.buyer_tax_id,
-        "seller_name": invoice.seller_name,
-        "seller_tax_id": invoice.seller_tax_id,
-        "item_name": invoice.item_name,
-        "total_with_tax": invoice.total_with_tax,
-        "specification": invoice.specification,
-        "unit": invoice.unit,
-        "quantity": invoice.quantity,
-        "unit_price": invoice.unit_price,
-        "amount": invoice.amount,
-        "tax_rate": invoice.tax_rate,
-        "tax_amount": invoice.tax_amount,
-        "created_at": invoice.created_at,
-        "updated_at": invoice.updated_at,
+    # Share the list response fields; load related sources explicitly to avoid lazy IO.
+    invoice_dict = InvoiceResponse.model_validate(invoice).model_dump()
+    invoice_dict.update({
         "ocr_result": ocr,
         "llm_result": llm,
         "parsing_diffs": list(diffs),
         "ai_verification": verification,
-    }
+    })
 
     return InvoiceDetailResponse.model_validate(invoice_dict)
 
@@ -518,8 +557,10 @@ _ATTACHMENT_CONTENT_TYPES = {
 }
 
 
-async def _get_accessible_invoice(invoice_id: int, user: User, db: AsyncSession) -> Invoice:
+async def _get_accessible_invoice(invoice_id: int, user: User, db: AsyncSession, *, lock=False) -> Invoice:
     query = select(Invoice).where(Invoice.id == invoice_id)
+    if lock:
+        query = query.with_for_update().execution_options(populate_existing=True)
     result = await db.execute(query)
     invoice = result.scalar_one_or_none()
     if not invoice:
@@ -537,11 +578,16 @@ async def upload_attachments(
     files: List[UploadFile] = File(...),
     category: str = Form("other"),
     note: Optional[str] = Form(None),
+    workflow_run_id: Optional[int] = Form(None),
+    client_file_ids: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """为发票上传附件（合同、收货单等），支持多文件。"""
-    await _get_accessible_invoice(invoice_id, current_user, db)
+    run, upload_keys = await prepare_workflow_upload(
+        db, workflow_run_id, current_user, files, client_file_ids, "attachments", invoice_id,
+    )
+    await _get_accessible_invoice(invoice_id, current_user, db, lock=True)
 
     try:
         category_enum = AttachmentCategory(category)
@@ -549,7 +595,7 @@ async def upload_attachments(
         raise HTTPException(status_code=400, detail=f"无效的附件分类: {category}")
 
     results: List[AttachmentUploadResult] = []
-    for file in files:
+    for file, upload_key in zip(files, upload_keys):
         ext = file.filename.split(".")[-1].lower() if file.filename else ""
         if ext not in ATTACHMENT_EXTENSIONS:
             results.append(AttachmentUploadResult(
@@ -559,6 +605,16 @@ async def upload_attachments(
             continue
 
         content = await file.read()
+        if run is not None and upload_key in (run.uploaded_attachments or {}):
+            existing = await db.get(Attachment, run.uploaded_attachments[upload_key])
+            same = (existing is not None and existing.invoice_id == invoice_id
+                    and existing.file_name == file.filename and existing.file_data == content)
+            results.append(AttachmentUploadResult(
+                id=existing.id if same else 0, file_name=file.filename or "unknown",
+                status="success" if same else "error",
+                message="附件已上传" if same else "相同上传标识对应了不同附件或发票",
+            ))
+            continue
         if len(content) > settings.max_file_size:
             results.append(AttachmentUploadResult(
                 id=0, file_name=file.filename or "unknown", status="error",
@@ -576,11 +632,14 @@ async def upload_attachments(
         )
         db.add(attachment)
         await db.flush()
+        if run is not None:
+            run.uploaded_attachments = {**(run.uploaded_attachments or {}), upload_key: attachment.id}
         results.append(AttachmentUploadResult(
             id=attachment.id, file_name=attachment.file_name,
             status="success", message="附件上传成功",
         ))
 
+    record_upload_results(run, upload_keys, results)
     await db.commit()
     return results
 
@@ -636,7 +695,7 @@ async def delete_attachment(
     current_user: User = Depends(get_current_user),
 ):
     """删除发票的一个附件。"""
-    await _get_accessible_invoice(invoice_id, current_user, db)
+    await _get_accessible_invoice(invoice_id, current_user, db, lock=True)
     attachment = await db.get(Attachment, attachment_id)
     if not attachment or attachment.invoice_id != invoice_id:
         raise HTTPException(status_code=404, detail="附件不存在")
@@ -655,7 +714,7 @@ async def update_invoice(
     current_user: User = Depends(get_current_user),
 ):
     """更新发票信息"""
-    query = select(Invoice).where(Invoice.id == invoice_id)
+    query = select(Invoice).where(Invoice.id == invoice_id).with_for_update()
     result = await db.execute(query)
     invoice = result.scalar_one_or_none()
 
@@ -722,7 +781,7 @@ async def batch_update_invoices(
     if batch_request.owner is not None and current_user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="只有管理员可以修改发票归属人")
 
-    query = select(Invoice).where(Invoice.id.in_(batch_request.invoice_ids))
+    query = select(Invoice).where(Invoice.id.in_(batch_request.invoice_ids)).order_by(Invoice.id).with_for_update()
     result = await db.execute(query)
     invoices = [
         inv for inv in result.scalars().all()
@@ -787,6 +846,8 @@ async def batch_delete_invoices(
     if not invoices:
         raise HTTPException(status_code=404, detail="未找到要删除的发票")
 
+    await prevent_workflow_invoice_deletion(db, [invoice.id for invoice in invoices])
+
     client_info = get_client_info(request)
     deleted_count = 0
     for invoice in invoices:
@@ -826,6 +887,8 @@ async def batch_reprocess_invoices(
 
     if not batch_request.invoice_ids:
         raise HTTPException(status_code=400, detail="请选择要重新解析的发票")
+
+    await lock_for_manual_reprocess(db, batch_request.invoice_ids, current_user)
 
     # Query invoices to reprocess (ownership-filtered)
     query = select(Invoice).where(Invoice.id.in_(batch_request.invoice_ids))
@@ -894,7 +957,8 @@ async def process_invoice(
     """处理发票：运行OCR解析"""
     from app.services.invoice_service import process_invoice as do_process
 
-    query = select(Invoice).where(Invoice.id == invoice_id)
+    await lock_for_manual_reprocess(db, [invoice_id], current_user)
+    query = select(Invoice).where(Invoice.id == invoice_id).with_for_update()
     result = await db.execute(query)
     invoice = result.scalar_one_or_none()
 
@@ -902,11 +966,17 @@ async def process_invoice(
         raise HTTPException(status_code=404, detail="发票不存在")
     _check_invoice_access(invoice, current_user)
 
+    invoice.status = InvoiceStatus.PROCESSING
+    await db.commit()
     success = await do_process(invoice_id, db)
 
     if success:
         return {"message": "解析成功", "invoice_id": invoice_id}
     else:
+        invoice = await db.get(Invoice, invoice_id)
+        if invoice is not None and invoice.status == InvoiceStatus.PROCESSING:
+            invoice.status = InvoiceStatus.FAILED
+            await db.commit()
         raise HTTPException(status_code=500, detail="解析失败")
 
 
@@ -918,13 +988,15 @@ async def delete_invoice(
     current_user: User = Depends(get_current_user),
 ):
     """删除发票"""
-    query = select(Invoice).where(Invoice.id == invoice_id)
+    query = select(Invoice).where(Invoice.id == invoice_id).with_for_update()
     result = await db.execute(query)
     invoice = result.scalar_one_or_none()
 
     if not invoice:
         raise HTTPException(status_code=404, detail="发票不存在")
     _check_invoice_access(invoice, current_user)
+
+    await prevent_workflow_invoice_deletion(db, [invoice_id])
 
     # Audit log
     client_info = get_client_info(request)
@@ -958,7 +1030,7 @@ async def resolve_diff(
     from decimal import Decimal as Dec
 
     # Ownership check on the invoice before touching its diff
-    invoice_query = select(Invoice).where(Invoice.id == invoice_id)
+    invoice_query = select(Invoice).where(Invoice.id == invoice_id).with_for_update()
     invoice_result = await db.execute(invoice_query)
     invoice = invoice_result.scalar_one_or_none()
     if not invoice:
@@ -1070,7 +1142,7 @@ async def confirm_invoice(
 ):
     """确认发票，标记所有差异为已解决。"""
     # Get invoice
-    invoice_query = select(Invoice).where(Invoice.id == invoice_id)
+    invoice_query = select(Invoice).where(Invoice.id == invoice_id).with_for_update()
     invoice_result = await db.execute(invoice_query)
     invoice = invoice_result.scalar_one_or_none()
 
@@ -1158,38 +1230,13 @@ async def ai_verify_invoice(
 
     结果覆盖式保存（每张发票仅保留最近一次），不改发票业务状态。
     """
-    import asyncio
-
-    from app.services.invoice_service import COMPARABLE_FIELDS, _llm_executor, run_ai_verify
-    from app.services.llm_service import LLMService
-    from app.services.provider_service import get_active_provider_row
+    from app.services.ai_verification_service import NoProviderError, verify_invoice
 
     invoice = await _get_accessible_invoice(invoice_id, current_user, db)
-
-    provider_row = await get_active_provider_row(db)
-    llm_service = LLMService(provider_row)
-    if not llm_service.is_available:
-        raise HTTPException(status_code=409, detail="未配置可用的LLM服务，请先在设置页配置并启用")
-
-    ocr = (await db.execute(
-        select(OcrResult).where(OcrResult.invoice_id == invoice_id)
-    )).scalar_one_or_none()
-
-    def _plain(value):
-        if value is None:
-            return None
-        if hasattr(value, "isoformat"):  # date / Decimal-safe
-            return value.isoformat()
-        return str(value)
-
-    current_values = {name: _plain(getattr(invoice, name)) for name in COMPARABLE_FIELDS}
-
-    loop = asyncio.get_running_loop()
     try:
-        outcome = await loop.run_in_executor(
-            _llm_executor, run_ai_verify, llm_service, current_values,
-            ocr.raw_text if ocr else None, invoice.file_data, invoice.file_type,
-        )
+        outcome = await verify_invoice(db, invoice)
+    except NoProviderError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
@@ -1199,19 +1246,7 @@ async def ai_verify_invoice(
     incorrect = sum(1 for f in verdict["fields"] if f["status"] == "incorrect")
     unsure = sum(1 for f in verdict["fields"] if f["status"] == "unsure")
 
-    # One row per invoice: replace the previous verification
-    await db.execute(delete(AiVerification).where(AiVerification.invoice_id == invoice_id))
-    verification = AiVerification(
-        invoice_id=invoice_id,
-        overall=verdict["overall"],
-        summary=verdict["summary"],
-        fields=verdict["fields"],
-        mode=outcome["mode"],
-        provider_name=provider_row.display_name or provider_row.name,
-        model=provider_row.model,
-        raw_response=outcome["content"],
-    )
-    db.add(verification)
+    verification = outcome["verification"]
 
     client_info = get_client_info(request)
     await log_audit_no_commit(
@@ -1287,9 +1322,9 @@ async def export_invoices_csv(
 
     # Header row
     writer.writerow([
-        '发票号码', '开票日期', '购买方名称', '购买方纳税人识别号',
+        '发票号码', '开票日期', '发票类型', '购买方名称', '购买方纳税人识别号',
         '销售方名称', '销售方纳税人识别号', '项目名称',
-        '金额', '税额', '价税合计', '税率',
+        '金额', '税额', '价税合计', '税率', '备注',
         '状态', '归属人', '文件名', '创建时间'
     ])
 
@@ -1298,6 +1333,7 @@ async def export_invoices_csv(
         writer.writerow([
             inv.invoice_number or '',
             str(inv.issue_date) if inv.issue_date else '',
+            inv.invoice_type or '',
             inv.buyer_name or '',
             inv.buyer_tax_id or '',
             inv.seller_name or '',
@@ -1307,6 +1343,7 @@ async def export_invoices_csv(
             str(inv.tax_amount) if inv.tax_amount else '',
             str(inv.total_with_tax) if inv.total_with_tax else '',
             inv.tax_rate or '',
+            inv.remark or '',
             inv.status.value if inv.status else '',
             inv.owner or '',
             inv.file_name or '',
@@ -1316,11 +1353,11 @@ async def export_invoices_csv(
     # Totals row
     from app.services.export_service import compute_totals
     totals = compute_totals(invoices)
-    writer.writerow([
-        '合计', '', '', '', '', '', '',
-        str(totals['amount']), str(totals['tax_amount']), str(totals['total_with_tax']),
-        '', '', '', '', '',
-    ])
+    writer.writerow(
+        ['合计', '', '', '', '', '', '', ''] +
+        [str(totals['amount']), str(totals['tax_amount']), str(totals['total_with_tax'])] +
+        ['', '', '', '', '']
+    )
 
     output.seek(0)
 
@@ -1344,17 +1381,22 @@ async def export_invoices_excel(
     owner: Optional[str] = Query(None, description="归属人筛选"),
     start_date: Optional[str] = Query(None, description="开始日期"),
     end_date: Optional[str] = Query(None, description="结束日期"),
+    template_id: Optional[int] = Query(None, description="已发布的Excel模板"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """导出发票为Excel格式"""
     from urllib.parse import quote
 
-    try:
-        import openpyxl
-        from openpyxl.styles import Font, Alignment, Border, Side
-    except ImportError:
-        raise HTTPException(status_code=500, detail="Excel导出需要安装openpyxl库")
+    from app.models.workflow import ExportTemplate
+    from app.services.excel_template_service import build_excel_export, build_export_filename, default_config
+
+    config = default_config()
+    if template_id is not None:
+        template = await db.get(ExportTemplate, template_id)
+        if not template or not template.enabled or not template.published_config:
+            raise HTTPException(404, "可用的已发布模板不存在")
+        config = template.published_config
 
     query = select(Invoice)
 
@@ -1378,90 +1420,10 @@ async def export_invoices_excel(
     result = await db.execute(query)
     invoices = result.scalars().all()
 
-    # Create workbook
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "发票列表"
-
-    # Header row
-    headers = [
-        '发票号码', '开票日期', '购买方名称', '购买方纳税人识别号',
-        '销售方名称', '销售方纳税人识别号', '项目名称',
-        '金额', '税额', '价税合计', '税率',
-        '状态', '归属人', '文件名', '创建时间'
-    ]
-
-    header_font = Font(bold=True)
-    thin_border = Border(
-        left=Side(style='thin'),
-        right=Side(style='thin'),
-        top=Side(style='thin'),
-        bottom=Side(style='thin')
-    )
-
-    for col, header in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col, value=header)
-        cell.font = header_font
-        cell.border = thin_border
-        cell.alignment = Alignment(horizontal='center')
-
-    # Data rows
-    for row, inv in enumerate(invoices, 2):
-        data = [
-            inv.invoice_number or '',
-            str(inv.issue_date) if inv.issue_date else '',
-            inv.buyer_name or '',
-            inv.buyer_tax_id or '',
-            inv.seller_name or '',
-            inv.seller_tax_id or '',
-            inv.item_name or '',
-            float(inv.amount) if inv.amount else '',
-            float(inv.tax_amount) if inv.tax_amount else '',
-            float(inv.total_with_tax) if inv.total_with_tax else '',
-            inv.tax_rate or '',
-            inv.status.value if inv.status else '',
-            inv.owner or '',
-            inv.file_name or '',
-            inv.created_at.strftime('%Y-%m-%d %H:%M:%S') if inv.created_at else ''
-        ]
-
-        for col, value in enumerate(data, 1):
-            cell = ws.cell(row=row, column=col, value=value)
-            cell.border = thin_border
-
-    # Auto-adjust column widths
-    # Totals row
-    from app.services.export_service import compute_totals
-    totals = compute_totals(invoices)
-    totals_row_index = len(invoices) + 2
-    totals_values = [
-        '合计', '', '', '', '', '', '',
-        float(totals['amount']), float(totals['tax_amount']), float(totals['total_with_tax']),
-        '', '', '', '', '',
-    ]
-    for col, value in enumerate(totals_values, 1):
-        cell = ws.cell(row=totals_row_index, column=col, value=value)
-        cell.font = header_font
-        cell.border = thin_border
-
-    for col in ws.columns:
-        max_length = 0
-        column = col[0].column_letter
-        for cell in col:
-            try:
-                if len(str(cell.value)) > max_length:
-                    max_length = len(str(cell.value))
-            except:
-                pass
-        adjusted_width = min(max_length + 2, 50)
-        ws.column_dimensions[column].width = adjusted_width
-
-    output = BytesIO()
-    wb.save(output)
-    output.seek(0)
+    output = build_excel_export(invoices, config)
 
     await _log_batch_action(db, request, current_user, "export_excel", invoices)
-    filename = quote('发票导出.xlsx')
+    filename = quote(build_export_filename(config) if template_id is not None else '发票导出.xlsx')
     return StreamingResponse(
         output,
         media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',

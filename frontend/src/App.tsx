@@ -5,6 +5,9 @@ import InvoiceDetailPage from './pages/InvoiceDetailPage';
 import LoginPage from './pages/LoginPage';
 import SettingsPage from './pages/SettingsPage';
 import LogsPage from './pages/LogsPage';
+import WorkflowsPage, { WorkflowRunPage } from './pages/WorkflowsPage';
+import ExportTemplatesPage from './pages/ExportTemplatesPage';
+import NotificationChannelsPage from './pages/NotificationChannelsPage';
 import { MainLayout } from './components/layout';
 import { getLLMStatus, getToken, clearToken, getCurrentUser } from './services/api';
 import type { User } from './types/user';
@@ -90,7 +93,11 @@ function AppContent() {
     >
       <Routes>
         <Route path="/" element={<InvoiceListPage />} />
-        <Route path="/invoices/:id" element={<InvoiceDetailPage />} />
+        <Route path="/invoices/:id" element={<InvoiceDetailPage key={location.pathname} />} />
+        <Route path="/workflows" element={<WorkflowsPage currentUser={user} />} />
+        <Route path="/workflows/runs/:id" element={<WorkflowRunPage />} />
+        <Route path="/export-templates" element={user.role === 'admin' ? <ExportTemplatesPage /> : <Navigate to="/workflows" replace />} />
+        <Route path="/settings/notification-channels" element={user.role === 'admin' ? <NotificationChannelsPage /> : <Navigate to="/workflows" replace />} />
         <Route
           path="/settings"
           element={user.role === 'admin' ? <SettingsPage currentUser={user} /> : <Navigate to="/" replace />}

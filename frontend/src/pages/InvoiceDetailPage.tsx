@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useState, useEffect, useRef } from 'react';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import {
   Descriptions,
   Button,
@@ -15,6 +15,8 @@ import {
 } from 'antd';
 import {
   ArrowLeftOutlined,
+  LeftOutlined,
+  RightOutlined,
   DeleteOutlined,
   EditOutlined,
   FullscreenOutlined,
@@ -32,6 +34,7 @@ import {
   deleteAttachment,
   getAttachmentFileUrl,
   getInvoice,
+  getInvoiceNavigation,
   getInvoiceFileUrl,
   getLLMStatus,
   getToken,
@@ -42,23 +45,31 @@ import {
   updateInvoice,
   uploadAttachments,
 } from '../services/api';
+import type { InvoiceNavigation, ListParams } from '../services/api';
 import type { Attachment, AttachmentCategory } from '../types/attachment';
 import { ATTACHMENT_CATEGORY_LABELS } from '../types/attachment';
 import type { AiVerificationField, InvoiceDetail } from '../types/invoice';
-import { InvoiceStatus } from '../types/invoice';
+import { getAiFieldSeverity, InvoiceStatus, summarizeAiVerification } from '../types/invoice';
 import { formatBackendTime } from '../utils/time';
 import StatusTag from '../components/StatusTag';
 import styles from './InvoiceDetailPage.module.css';
 
 const fieldLabels: Record<string, string> = {
   invoice_number: '发票号码',
+  invoice_type: '发票类型',
+  invoice_code: '发票代码',
   issue_date: '开票日期',
   buyer_name: '购买方名称',
   buyer_tax_id: '购买方纳税人识别号',
+  buyer_address_phone: '购买方地址电话',
+  buyer_bank_account: '购买方开户行及账号',
   seller_name: '销售方名称',
   seller_tax_id: '销售方纳税人识别号',
+  seller_address_phone: '销售方地址电话',
+  seller_bank_account: '销售方开户行及账号',
   item_name: '项目名称',
   total_with_tax: '价税合计',
+  total_with_tax_cn: '价税合计(大写)',
   specification: '规格型号',
   unit: '单位',
   quantity: '数量',
@@ -66,6 +77,8 @@ const fieldLabels: Record<string, string> = {
   amount: '金额',
   tax_rate: '税率',
   tax_amount: '税额',
+  remark: '备注',
+  drawer: '开票人',
 };
 
 /** Pretty-print the service raw response when it is JSON, else return as-is. */
@@ -80,7 +93,13 @@ function formatRawResponse(raw: string): string {
 function InvoiceDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
+  const navigationFilters = location.state?.invoiceFilters as ListParams | undefined;
   const [loading, setLoading] = useState(true);
+  const [navigation, setNavigation] = useState<InvoiceNavigation | null>(null);
+  const [navigationLoading, setNavigationLoading] = useState(true);
+  const navigationPending = useRef(false);
+  const [saving, setSaving] = useState(false);
   const [reprocessing, setReprocessing] = useState(false);
   const [invoice, setInvoice] = useState<InvoiceDetail | null>(null);
   const [editMode, setEditMode] = useState(false);
@@ -180,9 +199,42 @@ function InvoiceDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
+  useEffect(() => {
+    if (!id) return;
+    let active = true;
+    setNavigationLoading(true);
+    getInvoiceNavigation(parseInt(id), navigationFilters)
+      .then(result => { if (active) setNavigation(result); })
+      .catch(() => { if (active) message.warning('切换导航加载失败，请刷新页面重试'); })
+      .finally(() => { if (active) setNavigationLoading(false); });
+    return () => { active = false; };
+  }, [id, navigationFilters]);
+
+  const navigationBusy = navigationLoading || saving || reprocessing || aiVerifying
+    || attachmentsUploading || applyingFix !== null || resolvingDiff !== null;
+
+  const handleNavigateInvoice = (target: number | null | undefined) => {
+    if (!target || navigationBusy || navigationPending.current) return;
+    navigationPending.current = true;
+    const switchInvoice = () => navigate(`/invoices/${target}`, { state: location.state });
+    if (editMode || attachmentFiles.length > 0) {
+      Modal.confirm({
+        title: '确认切换发票？',
+        content: '尚未保存的修改或未上传的附件不会保留。',
+        okText: '放弃并切换',
+        cancelText: '继续编辑',
+        onOk: switchInvoice,
+        onCancel: () => { navigationPending.current = false; },
+      });
+    } else {
+      switchInvoice();
+    }
+  };
+
   const handleSave = async () => {
     if (!id || !invoice) return;
 
+    setSaving(true);
     try {
       const values = await form.validateFields();
       await updateInvoice(parseInt(id), values);
@@ -191,6 +243,8 @@ function InvoiceDetailPage() {
       fetchInvoice();
     } catch (error) {
       message.error('保存失败');
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -278,11 +332,9 @@ function InvoiceDetailPage() {
     const hideLoading = message.loading('AI校验中，可能需要数十秒…', 0);
     try {
       const result = await aiVerifyInvoice(parseInt(id));
-      message.success(
-        result.overall === 'pass'
-          ? 'AI校验通过：各字段与原件一致'
-          : 'AI校验完成：发现待确认问题，请查看下方结果'
-      );
+      const summary = summarizeAiVerification(result);
+      if (result.overall === 'pass') message.success(summary.label);
+      else message.warning(summary.label);
       await fetchInvoice();
     } catch (error: unknown) {
       if (error && typeof error === 'object' && 'response' in error) {
@@ -349,6 +401,11 @@ function InvoiceDetailPage() {
   const aiFixableFields = (invoice.ai_verification?.fields ?? []).filter(
     (f) => f.status === 'incorrect' && f.corrected_value
   );
+  const aiGroups = [
+    { severity: 'blocking', title: '关键问题' },
+    { severity: 'warning', title: '提示（不影响审核通过）' },
+    { severity: 'none', title: '无需处理' },
+  ].map(group => ({ ...group, fields: (invoice.ai_verification?.fields ?? []).filter(field => getAiFieldSeverity(field) === group.severity) }));
 
   return (
     <div className={styles.pageContainer}>
@@ -369,12 +426,29 @@ function InvoiceDetailPage() {
           </div>
         </div>
         <div className={styles.headerActions}>
-          <button className={styles.rejectButton} disabled title="功能开发中">
+          <Button
+            icon={<LeftOutlined />}
+            disabled={navigationBusy || !navigation?.previous_id}
+            loading={navigationLoading}
+            title={!navigationLoading && navigation && !navigation.previous_id ? '已是第一张发票' : '上一张发票'}
+            onClick={() => handleNavigateInvoice(navigation?.previous_id)}
+          >
+            上一张
+          </Button>
+          <Button
+            icon={<RightOutlined />}
+            disabled={navigationBusy || !navigation?.next_id}
+            title={!navigationLoading && navigation && !navigation.next_id ? '已是最后一张发票' : '下一张发票'}
+            onClick={() => handleNavigateInvoice(navigation?.next_id)}
+          >
+            下一张
+          </Button>
+          <Button disabled title="功能开发中">
             拒绝
-          </button>
-          <button className={styles.confirmButton} onClick={handleConfirmAll}>
+          </Button>
+          <Button type="primary" onClick={handleConfirmAll}>
             确认发票
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -395,7 +469,7 @@ function InvoiceDetailPage() {
                 {editMode ? (
                   <>
                     <Button onClick={() => setEditMode(false)}>取消</Button>
-                    <Button type="primary" icon={<SaveOutlined />} onClick={handleSave}>
+                    <Button type="primary" icon={<SaveOutlined />} onClick={handleSave} loading={saving}>
                       保存
                     </Button>
                   </>
@@ -416,6 +490,16 @@ function InvoiceDetailPage() {
                       </Form.Item>
                     </Col>
                     <Col span={12}>
+                      <Form.Item name="invoice_type" label="发票类型">
+                        <Input placeholder="如：电子发票（普通发票）" />
+                      </Form.Item>
+                    </Col>
+                    <Col span={12}>
+                      <Form.Item name="invoice_code" label="发票代码">
+                        <Input />
+                      </Form.Item>
+                    </Col>
+                    <Col span={12}>
                       <Form.Item name="issue_date" label="开票日期">
                         <Input />
                       </Form.Item>
@@ -431,6 +515,16 @@ function InvoiceDetailPage() {
                       </Form.Item>
                     </Col>
                     <Col span={12}>
+                      <Form.Item name="buyer_address_phone" label="购买方地址、电话">
+                        <Input />
+                      </Form.Item>
+                    </Col>
+                    <Col span={12}>
+                      <Form.Item name="buyer_bank_account" label="购买方开户行及账号">
+                        <Input />
+                      </Form.Item>
+                    </Col>
+                    <Col span={12}>
                       <Form.Item name="seller_name" label="销售方名称">
                         <Input />
                       </Form.Item>
@@ -440,9 +534,39 @@ function InvoiceDetailPage() {
                         <Input />
                       </Form.Item>
                     </Col>
+                    <Col span={12}>
+                      <Form.Item name="seller_address_phone" label="销售方地址、电话">
+                        <Input />
+                      </Form.Item>
+                    </Col>
+                    <Col span={12}>
+                      <Form.Item name="seller_bank_account" label="销售方开户行及账号">
+                        <Input />
+                      </Form.Item>
+                    </Col>
                     <Col span={24}>
                       <Form.Item name="item_name" label="项目名称">
                         <Input />
+                      </Form.Item>
+                    </Col>
+                    <Col span={6}>
+                      <Form.Item name="specification" label="规格型号">
+                        <Input />
+                      </Form.Item>
+                    </Col>
+                    <Col span={6}>
+                      <Form.Item name="unit" label="单位">
+                        <Input />
+                      </Form.Item>
+                    </Col>
+                    <Col span={6}>
+                      <Form.Item name="quantity" label="数量">
+                        <Input type="number" />
+                      </Form.Item>
+                    </Col>
+                    <Col span={6}>
+                      <Form.Item name="unit_price" label="单价">
+                        <Input type="number" />
                       </Form.Item>
                     </Col>
                     <Col span={8}>
@@ -461,6 +585,21 @@ function InvoiceDetailPage() {
                       </Form.Item>
                     </Col>
                     <Col span={12}>
+                      <Form.Item name="tax_rate" label="税率">
+                        <Input placeholder="如 6%、免税" />
+                      </Form.Item>
+                    </Col>
+                    <Col span={12}>
+                      <Form.Item name="total_with_tax_cn" label="价税合计（大写）">
+                        <Input />
+                      </Form.Item>
+                    </Col>
+                    <Col span={12}>
+                      <Form.Item name="drawer" label="开票人">
+                        <Input />
+                      </Form.Item>
+                    </Col>
+                    <Col span={12}>
                       <Form.Item name="status" label="状态">
                         <Select
                           options={Object.values(InvoiceStatus).map((s) => ({
@@ -475,6 +614,11 @@ function InvoiceDetailPage() {
                         <Input />
                       </Form.Item>
                     </Col>
+                    <Col span={24}>
+                      <Form.Item name="remark" label="备注">
+                        <Input.TextArea rows={2} />
+                      </Form.Item>
+                    </Col>
                   </Row>
                 </Form>
               ) : (
@@ -482,8 +626,14 @@ function InvoiceDetailPage() {
                   <Descriptions.Item label="发票号码">
                     {invoice.invoice_number || '-'}
                   </Descriptions.Item>
+                  <Descriptions.Item label="发票类型">
+                    {invoice.invoice_type || '-'}
+                  </Descriptions.Item>
                   <Descriptions.Item label="开票日期">
                     {invoice.issue_date || '-'}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="发票代码">
+                    {invoice.invoice_code || '-'}
                   </Descriptions.Item>
                   <Descriptions.Item label="购买方名称">
                     {invoice.buyer_name || '-'}
@@ -491,11 +641,23 @@ function InvoiceDetailPage() {
                   <Descriptions.Item label="购买方纳税人识别号">
                     {invoice.buyer_tax_id || '-'}
                   </Descriptions.Item>
+                  <Descriptions.Item label="购买方地址、电话">
+                    {invoice.buyer_address_phone || '-'}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="购买方开户行及账号">
+                    {invoice.buyer_bank_account || '-'}
+                  </Descriptions.Item>
                   <Descriptions.Item label="销售方名称">
                     {invoice.seller_name || '-'}
                   </Descriptions.Item>
                   <Descriptions.Item label="销售方纳税人识别号">
                     {invoice.seller_tax_id || '-'}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="销售方地址、电话">
+                    {invoice.seller_address_phone || '-'}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="销售方开户行及账号">
+                    {invoice.seller_bank_account || '-'}
                   </Descriptions.Item>
                   <Descriptions.Item label="项目名称" span={2}>
                     {invoice.item_name || '-'}
@@ -523,6 +685,15 @@ function InvoiceDetailPage() {
                   </Descriptions.Item>
                   <Descriptions.Item label="价税合计">
                     {invoice.total_with_tax != null ? `¥${Number(invoice.total_with_tax).toFixed(2)}` : '-'}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="价税合计（大写）">
+                    {invoice.total_with_tax_cn || '-'}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="开票人">
+                    {invoice.drawer || '-'}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="备注" span={2}>
+                    {invoice.remark || '-'}
                   </Descriptions.Item>
                   <Descriptions.Item label="归属人">
                     {invoice.owner || '-'}
@@ -688,11 +859,9 @@ function InvoiceDetailPage() {
               <div className={styles.cardHeader}>
                 <div className={styles.cardTitle}>
                   AI校验结果
-                  {invoice.ai_verification.overall === 'pass' ? (
-                    <StatusTag status="success">校验通过</StatusTag>
-                  ) : (
-                    <StatusTag status="warning">发现问题</StatusTag>
-                  )}
+                  <StatusTag status={invoice.ai_verification.overall === 'pass' ? 'success' : 'error'}>
+                    {summarizeAiVerification(invoice.ai_verification).label}
+                  </StatusTag>
                 </div>
                 <div className={styles.cardActions}>
                   {aiFixableFields.length > 0 && (
@@ -703,7 +872,7 @@ function InvoiceDetailPage() {
                       loading={applyingFix === 'all'}
                       onClick={() => handleApplyAiFixes(aiFixableFields)}
                     >
-                      一键应用修正（{aiFixableFields.length}）
+                      手动采纳全部建议（{aiFixableFields.length}）
                     </Button>
                   )}
                   {llmConfigured && (
@@ -734,7 +903,10 @@ function InvoiceDetailPage() {
                     {invoice.ai_verification.summary}
                   </div>
                 )}
-                <table className={styles.comparisonTable}>
+                {aiGroups.filter(group => group.fields.length > 0).map(group => (
+                <section key={group.severity} style={{ marginBottom: 16 }} aria-label={group.title}>
+                  <h4>{group.title}（{group.fields.length}）</h4>
+                  <table className={styles.comparisonTable}>
                   <thead>
                     <tr>
                       <th style={{ width: '18%' }}>字段</th>
@@ -745,7 +917,7 @@ function InvoiceDetailPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {(invoice.ai_verification.fields ?? []).map((f) => {
+                    {group.fields.map((f) => {
                       const currentValue = invoice[f.field as keyof InvoiceDetail];
                       const display = currentValue === null || currentValue === undefined
                         ? '-'
@@ -753,7 +925,7 @@ function InvoiceDetailPage() {
                       return (
                         <tr
                           key={f.field}
-                          className={f.status === 'incorrect' ? styles.mismatch : undefined}
+                          className={getAiFieldSeverity(f) === 'blocking' ? styles.mismatch : undefined}
                         >
                           <td className={styles.fieldCell}>
                             {fieldLabels[f.field] || f.field}
@@ -762,7 +934,7 @@ function InvoiceDetailPage() {
                           <td>{f.corrected_value || '-'}</td>
                           <td>
                             {f.status === 'correct' && <StatusTag status="success">正确</StatusTag>}
-                            {f.status === 'incorrect' && <StatusTag status="error">不符</StatusTag>}
+                            {f.status === 'incorrect' && <StatusTag status={getAiFieldSeverity(f) === 'warning' ? 'warning' : 'error'}>不符</StatusTag>}
                             {f.status === 'unsure' && <StatusTag status="warning">存疑</StatusTag>}
                           </td>
                           <td>
@@ -775,7 +947,7 @@ function InvoiceDetailPage() {
                                   loading={applyingFix === f.field}
                                   onClick={() => handleApplyAiFixes([f])}
                                 >
-                                  应用
+                                  手动采纳
                                 </Button>
                               )}
                             </span>
@@ -784,7 +956,9 @@ function InvoiceDetailPage() {
                       );
                     })}
                   </tbody>
-                </table>
+                  </table>
+                </section>
+                ))}
                 {invoice.ai_verification.raw_response && (
                   <Collapse
                     style={{ marginTop: 12 }}

@@ -35,7 +35,7 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
     <div className={styles.container}>
       <div className={styles.card}>
         <div className={styles.logo}>
-          <div className={styles.logoMark} />
+          <img className={styles.logoMark} src="/favicon.svg" alt="发票管理" />
           <span className={styles.logoText}>发票管理</span>
         </div>
         <h1 className={styles.title}>登录</h1>

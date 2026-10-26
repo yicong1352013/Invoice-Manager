@@ -32,6 +32,16 @@ class InvoiceBase(BaseModel):
     amount: Optional[Decimal] = Field(None, description="金额")
     tax_rate: Optional[str] = Field(None, description="税率")
     tax_amount: Optional[Decimal] = Field(None, description="税额")
+    # 数电票票面表头字段（选填）
+    invoice_type: Optional[str] = Field(None, description="发票名称/类型")
+    invoice_code: Optional[str] = Field(None, description="发票代码")
+    buyer_address_phone: Optional[str] = Field(None, description="购买方地址、电话")
+    buyer_bank_account: Optional[str] = Field(None, description="购买方开户行及账号")
+    seller_address_phone: Optional[str] = Field(None, description="销售方地址、电话")
+    seller_bank_account: Optional[str] = Field(None, description="销售方开户行及账号")
+    total_with_tax_cn: Optional[str] = Field(None, description="价税合计（大写）")
+    remark: Optional[str] = Field(None, description="备注")
+    drawer: Optional[str] = Field(None, description="开票人")
 
 
 class InvoiceCreate(InvoiceBase):
@@ -63,6 +73,11 @@ class InvoiceListResponse(BaseModel):
     page_size: int
 
 
+class InvoiceNavigationResponse(BaseModel):
+    previous_id: Optional[int] = None
+    next_id: Optional[int] = None
+
+
 class OcrResultResponse(BaseModel):
     id: int
     invoice_id: int
@@ -83,6 +98,15 @@ class OcrResultResponse(BaseModel):
     amount: Optional[str] = None
     tax_rate: Optional[str] = None
     tax_amount: Optional[str] = None
+    invoice_type: Optional[str] = None
+    invoice_code: Optional[str] = None
+    buyer_address_phone: Optional[str] = None
+    buyer_bank_account: Optional[str] = None
+    seller_address_phone: Optional[str] = None
+    seller_bank_account: Optional[str] = None
+    total_with_tax_cn: Optional[str] = None
+    remark: Optional[str] = None
+    drawer: Optional[str] = None
     created_at: datetime
 
     class Config:
@@ -107,6 +131,15 @@ class LlmResultResponse(BaseModel):
     amount: Optional[str] = None
     tax_rate: Optional[str] = None
     tax_amount: Optional[str] = None
+    invoice_type: Optional[str] = None
+    invoice_code: Optional[str] = None
+    buyer_address_phone: Optional[str] = None
+    buyer_bank_account: Optional[str] = None
+    seller_address_phone: Optional[str] = None
+    seller_bank_account: Optional[str] = None
+    total_with_tax_cn: Optional[str] = None
+    remark: Optional[str] = None
+    drawer: Optional[str] = None
     created_at: datetime
 
     class Config:
@@ -132,7 +165,7 @@ class AiVerificationResponse(BaseModel):
     invoice_id: int
     overall: str                          # 'pass' | 'issues'
     summary: Optional[str] = None
-    fields: Optional[List[dict]] = None   # [{field, status, corrected_value, reason}]
+    fields: Optional[List[dict]] = None   # [{field, status, severity, corrected_value, reason}]
     mode: str                             # 'vision' | 'text'
     provider_name: Optional[str] = None
     model: Optional[str] = None

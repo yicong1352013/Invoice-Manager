@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Button, Input, Modal, Popconfirm, Select, Table, Tag, Upload, message } from 'antd';
+import { Alert, Button, Input, Modal, Popconfirm, Select, Space, Table, Tag, Upload, message } from 'antd';
 import {
   DeleteOutlined, DownloadOutlined, EyeOutlined, FilePdfOutlined,
   InboxOutlined, PaperClipOutlined, RedoOutlined, UploadOutlined,
@@ -8,7 +8,7 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import {
-  deleteInvoice, getInvoice, getInvoiceFileUrl, listInvoices,
+  deleteInvoice, getInvoice, getInvoiceFileUrl,
   reprocessInvoice, uploadAttachments, uploadInvoices,
 } from '../services/api';
 import type { Invoice } from '../types/invoice';
@@ -16,6 +16,8 @@ import { InvoiceStatus } from '../types/invoice';
 import type { AttachmentCategory } from '../types/attachment';
 import { ATTACHMENT_CATEGORY_LABELS } from '../types/attachment';
 import styles from './UploadModal.module.css';
+import api from '../services/api';
+import { createWorkflowRun, listWorkflows, workflowError, type WorkflowDefinition } from '../services/workflowApi';
 
 const INVOICE_EXTS = ['pdf', 'jpg', 'jpeg', 'png'];
 const ATTACHMENT_EXTS = [...INVOICE_EXTS, 'doc', 'docx', 'xls', 'xlsx'];
@@ -80,48 +82,35 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
   const [invoiceFiles, setInvoiceFiles] = useState<PendingFile[]>([]);
   const [attachmentRows, setAttachmentRows] = useState<PendingAttachment[]>([]);
   const [batchInvoices, setBatchInvoices] = useState<Invoice[]>([]);
-  const [existingOptions, setExistingOptions] = useState<InvoiceOption[]>([]);
   const [newOptions, setNewOptions] = useState<InvoiceOption[]>([]);
   const [lastNewInvoiceId, setLastNewInvoiceId] = useState<number | undefined>(undefined);
   const [uploading, setUploading] = useState(false);
   const [preview, setPreview] = useState<PreviewState | null>(null);
+  const [workflows, setWorkflows] = useState<WorkflowDefinition[]>([]);
+  const [workflowId, setWorkflowId] = useState<number>();
+  const [workflowRunId, setWorkflowRunId] = useState<number>();
+  const [runName, setRunName] = useState('');
+  const uploadingRef = useRef(false);
   const batchIdsRef = useRef<number[]>([]);
   const prevHadProcessingRef = useRef(false);
-
-  const invoiceOptions = useMemo(
-    () => [...newOptions, ...existingOptions.filter(
-      (e) => !newOptions.some((n) => n.value === e.value)
-    )],
-    [newOptions, existingOptions]
-  );
-
-  const loadExistingOptions = useCallback(async () => {
-    try {
-      const data = await listInvoices({ page: 1, page_size: 100 });
-      setExistingOptions(data.items.map((inv) => ({
-        value: inv.id,
-        // file name is what users recognize; invoice_number may still be blank
-        label: `#${inv.id} ${inv.file_name}`,
-      })));
-    } catch {
-      // non-fatal: this-batch invoices remain selectable
-    }
-  }, []);
 
   // Reset state whenever the modal opens
   useEffect(() => {
     if (open) {
+      listWorkflows().then(rows => setWorkflows(rows.filter(row => row.enabled))).catch(e => message.error(workflowError(e)));
+      if (workflowRunId) return;
       setInvoiceFiles([]);
       setAttachmentRows([]);
       setBatchInvoices([]);
       setNewOptions([]);
       setLastNewInvoiceId(undefined);
       prevHadProcessingRef.current = false;
-      loadExistingOptions();
     }
-  }, [open, loadExistingOptions]);
+  }, [open, workflowRunId]);
 
   const addFiles = (files: File[], allowedExts: string[], kind: 'invoice' | 'attachment') => {
+    if (uploadingRef.current) return;
+    if (workflowRunId) { message.warning('批次清单已锁定，请完成当前批次；需要增加文件时请新建批次。'); return; }
     const invoices: PendingFile[] = [];
     const attachments: PendingAttachment[] = [];
     for (const file of files) {
@@ -135,14 +124,14 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
         continue;
       }
       if (kind === 'invoice') {
-        invoices.push({ uid: `${file.name}-${file.size}-${Date.now()}-${Math.random()}`, file });
+        invoices.push({ uid: crypto.randomUUID(), file });
       } else {
         // default target: the most recently uploaded invoice of this batch
         attachments.push({
-          uid: `${file.name}-${file.size}-${Date.now()}-${Math.random()}`,
+          uid: crypto.randomUUID(),
           file,
           category: 'other',
-          targetInvoiceId: lastNewInvoiceId,
+          targetInvoiceId: !workflowId && newOptions.some(option => option.value === lastNewInvoiceId) ? lastNewInvoiceId : undefined,
         });
       }
     }
@@ -158,6 +147,7 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
   useEffect(() => {
     if (!open) return;
     const onPaste = (e: ClipboardEvent) => {
+      if (uploadingRef.current || workflowRunId) return;
       const images: File[] = [];
       for (const item of Array.from(e.clipboardData?.items ?? [])) {
         if (item.kind === 'file' && item.type.startsWith('image/')) {
@@ -177,7 +167,7 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
     document.addEventListener('paste', onPaste);
     return () => document.removeEventListener('paste', onPaste);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, lastNewInvoiceId]);
+  }, [open, lastNewInvoiceId, workflowId, workflowRunId]);
 
   const closePreview = () => {
     if (preview?.url.startsWith('blob:')) {
@@ -229,16 +219,24 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
   }, [open, hasProcessing, batchInvoices.length, refreshBatch, onCompleted]);
 
   const handleStartUpload = async () => {
+    if (uploadingRef.current) return;
     if (invoiceFiles.length === 0 && attachmentRows.length === 0) {
       message.warning('请先选择发票或附件文件');
       return;
     }
+    uploadingRef.current = true;
     setUploading(true);
     try {
+      let activeRunId = workflowRunId;
+      if (workflowId && !activeRunId) {
+        if (!invoiceFiles.length) { message.warning('工作流批次至少需要一张新发票'); return; }
+        const run = await createWorkflowRun({ workflow_id: workflowId, name: runName.trim() || `发票批次 ${dayjs().format('YYYY-MM-DD HH:mm')}`, upload_manifest: { invoices: invoiceFiles.map(p => ({ id: p.uid, name: p.file.name })), attachments: attachmentRows.map(p => ({ id: p.uid, name: p.file.name })) } });
+        activeRunId = run.id; setWorkflowRunId(run.id);
+      }
       // 1) invoices first — their ids become default attachment targets
       let uploadedIds: number[] = [];
       if (invoiceFiles.length > 0) {
-        const results = await uploadInvoices(invoiceFiles.map((p) => p.file));
+        const results = await uploadInvoices(invoiceFiles.map((p) => p.file), activeRunId, activeRunId ? invoiceFiles.map(p => p.uid) : undefined);
         const okIds: number[] = [];
         for (const r of results) {
           if (r.status === 'success' && r.id > 0) {
@@ -250,17 +248,17 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
         uploadedIds = okIds;
         if (okIds.length > 0) {
           const details = await Promise.all(okIds.map((id) => getInvoice(id)));
-          setBatchInvoices(details);
+          setBatchInvoices(prev => [...prev.filter(p => !okIds.includes(p.id)), ...details]);
           setNewOptions((prev) => [
             ...details.map((d) => ({ value: d.id, label: `#${d.id} ${d.file_name}（本次上传）` })),
-            ...prev,
+            ...prev.filter(option => !okIds.includes(option.value)),
           ]);
           const lastId = okIds[okIds.length - 1];
           setLastNewInvoiceId(lastId);
           // default unassigned attachments to the most recently uploaded invoice
-          setAttachmentRows((prev) => prev.map((r) => (r.targetInvoiceId ? r : { ...r, targetInvoiceId: lastId })));
+          if (!workflowId) setAttachmentRows((prev) => prev.map((r) => (r.targetInvoiceId ? r : { ...r, targetInvoiceId: lastId })));
         }
-        setInvoiceFiles([]);
+        setInvoiceFiles(prev => prev.filter((_, index) => results[index]?.status !== 'success'));
       }
 
       // 2) attachments — one request per file so each keeps its own note.
@@ -268,19 +266,23 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
       // unassigned rows and must prefer this click's uploads over the stale
       // lastNewInvoiceId state so it matches the backfill shown in the UI.
       if (attachmentRows.length > 0) {
-        const fallbackTarget = uploadedIds[uploadedIds.length - 1] ?? lastNewInvoiceId;
-        const unassigned = attachmentRows.filter((r) => !r.targetInvoiceId && !fallbackTarget);
+        const currentBatchIds = new Set([...newOptions.map(option => option.value), ...uploadedIds]);
+        const fallbackTarget = workflowId ? undefined : uploadedIds[uploadedIds.length - 1] ?? (lastNewInvoiceId && currentBatchIds.has(lastNewInvoiceId) ? lastNewInvoiceId : undefined);
+        const unassigned = attachmentRows.filter((row) => !currentBatchIds.has(row.targetInvoiceId ?? fallbackTarget ?? -1));
         if (unassigned.length > 0) {
-          message.warning('请为每个附件选择关联的发票');
+          message.warning('请先上传本次发票，再为每个附件选择关联发票');
           return;
         }
 
         let attachOk = 0;
+        const successfulRows: string[] = [];
         for (const row of attachmentRows) {
           const target = row.targetInvoiceId ?? fallbackTarget;
+          if (!target) continue;
           try {
-            const results = await uploadAttachments(target, [row.file], row.category, row.note);
+            const results = await uploadAttachments(target, [row.file], row.category, row.note, activeRunId, activeRunId ? [row.uid] : undefined);
             attachOk += results.filter((r) => r.status === 'success').length;
+            if (results.every(r => r.status === 'success') && results.length) successfulRows.push(row.uid);
             for (const r of results) {
               if (r.status !== 'success') {
                 message.error(`${r.file_name}：${r.message}`);
@@ -294,27 +296,30 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
         if (attachOk > 0) {
           message.success(`已上传 ${attachOk} 个附件`);
         }
-        setAttachmentRows([]);
+        setAttachmentRows(prev => prev.filter(row => !successfulRows.includes(row.uid)));
       }
 
       if (uploadedIds.length > 0) {
-        message.success(`已上传 ${uploadedIds.length} 张发票，正在识别…`);
+        message.success(workflowId ? `已上传 ${uploadedIds.length} 张发票，请关联附件后提交批次` : `已上传 ${uploadedIds.length} 张发票，正在识别…`);
       }
       onCompleted();
-      loadExistingOptions();
     } catch (error) {
-      message.error('上传失败，请重试');
+      message.error(workflowError(error));
       console.error(error);
     } finally {
+      uploadingRef.current = false;
       setUploading(false);
     }
   };
 
   const handleRowDelete = async (inv: Invoice) => {
+    if (uploadingRef.current) return;
     try {
       await deleteInvoice(inv.id);
       setBatchInvoices((prev) => prev.filter((i) => i.id !== inv.id));
       setNewOptions((prev) => prev.filter((o) => o.value !== inv.id));
+      setAttachmentRows(prev => prev.map(row => row.targetInvoiceId === inv.id ? { ...row, targetInvoiceId: undefined } : row));
+      setLastNewInvoiceId(previous => previous === inv.id ? undefined : previous);
       onCompleted();
     } catch {
       message.error('删除失败');
@@ -322,6 +327,7 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
   };
 
   const handleRowReprocess = async (inv: Invoice) => {
+    if (uploadingRef.current) return;
     try {
       await reprocessInvoice(inv.id);
       message.success(`发票 #${inv.id} 已重新开始识别`);
@@ -408,7 +414,9 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
           <Button
             type="link"
             size="small"
+            disabled={uploading}
             onClick={() => {
+              if (uploadingRef.current) return;
               closePreview();
               onClose();
               navigate(`/invoices/${record.id}`);
@@ -416,17 +424,18 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
           >
             详情
           </Button>
-          <Button
+          {!workflowId && <Button
             type="link"
             size="small"
             icon={<RedoOutlined />}
+            disabled={uploading}
             onClick={() => handleRowReprocess(record)}
           >
             重新解析
-          </Button>
-          <Popconfirm title="确定删除该发票？" onConfirm={() => handleRowDelete(record)}>
-            <Button type="link" size="small" danger icon={<DeleteOutlined />} />
-          </Popconfirm>
+          </Button>}
+          {!workflowId && <Popconfirm title="确定删除该发票？" onConfirm={() => handleRowDelete(record)}>
+            <Button aria-label={`删除本次发票${record.file_name}`} disabled={uploading} type="link" size="small" danger icon={<DeleteOutlined />} />
+          </Popconfirm>}
         </>
       ),
     },
@@ -454,7 +463,7 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
       {fileNameLink(name, file)}
       {extra}
       <span className={styles.fileSize}>{formatSize(file.size)}</span>
-      <Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={onRemove} />
+      <Button aria-label={`移除${name}`} disabled={uploading || !!workflowRunId} type="text" size="small" danger icon={<DeleteOutlined />} onClick={() => { if (!uploadingRef.current && !workflowRunId) onRemove(); }} />
     </div>
   );
 
@@ -463,7 +472,11 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
       <Modal
         title="发票上传"
         open={open}
+        closable={!uploading}
+        maskClosable={!uploading}
+        keyboard={!uploading}
         onCancel={() => {
+          if (uploadingRef.current) return;
           closePreview();
           onClose();
         }}
@@ -472,10 +485,10 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
         footer={
         <div className={styles.footerBar}>
           <span className={styles.footerHint}>
-            支持批量上传；发票上传后自动识别，附件将关联到所选发票
+            {workflowId ? '先上传文件，再明确附件归属，全部完成后提交批次' : '支持批量上传；发票上传后自动识别，附件将关联到所选发票'}
           </span>
           <span>
-            <Button onClick={onClose} style={{ marginRight: 8 }}>
+            <Button disabled={uploading} onClick={() => { if (!uploadingRef.current) onClose(); }} style={{ marginRight: 8 }}>
               关闭
             </Button>
             <Button
@@ -487,10 +500,18 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
             >
               开始上传
             </Button>
+            {workflowRunId && <Button style={{ marginLeft: 8 }} type="primary" loading={uploading} disabled={invoiceFiles.length > 0 || attachmentRows.length > 0} onClick={async () => {
+              if (uploadingRef.current) return;
+              uploadingRef.current = true;
+              setUploading(true);
+              try { await api.post(`/workflow-runs/${workflowRunId}/start`); const completedId = workflowRunId; setWorkflowRunId(undefined); setWorkflowId(undefined); onCompleted(); onClose(); navigate(`/workflows/runs/${completedId}`); }
+              catch (e) { message.error(workflowError(e)); } finally { uploadingRef.current = false; setUploading(false); }
+            }}>提交批次</Button>}
           </span>
         </div>
       }
     >
+      <div className={styles.section}><Space wrap><label htmlFor="upload-workflow">处理方式</label><Select id="upload-workflow" style={{ width: 260 }} allowClear disabled={!!workflowRunId || batchInvoices.length > 0 || uploading} value={workflowId} placeholder="普通上传（自动识别）" onChange={id => { if (uploadingRef.current) return; setWorkflowId(id); if (id) setAttachmentRows(prev => prev.map(row => ({ ...row, targetInvoiceId: undefined }))); }} options={workflows.map(w => ({ value: w.id, label: w.name }))} />{workflowId && <Input aria-label="工作流批次名称" style={{ width: 260 }} disabled={uploading || !!workflowRunId} value={runName} onChange={e => { if (!uploadingRef.current) setRunName(e.target.value); }} placeholder="批次名称（可选）" />}</Space>{workflowRunId && <Alert style={{ marginTop: 12 }} type="info" showIcon message={<span>已创建批次 #{workflowRunId}，清单已锁定。关闭后可在本页面重新打开继续。<Button type="link" disabled={uploading} onClick={() => { if (uploadingRef.current) return; onClose(); navigate(`/workflows/runs/${workflowRunId}`); }}>查看批次</Button><Popconfirm title="取消当前批次？已上传文件将保留。" disabled={uploading} onConfirm={async () => { if (uploadingRef.current) return; try { await api.post(`/workflow-runs/${workflowRunId}/cancel`); setWorkflowRunId(undefined); setInvoiceFiles([]); setAttachmentRows([]); setBatchInvoices([]); setNewOptions([]); } catch (e) { message.error(workflowError(e)); } }}><Button type="link" disabled={uploading} danger>取消批次</Button></Popconfirm></span>} />}</div>
       {/* Section 1: invoice upload */}
       <div className={styles.section}>
         <div className={styles.sectionHeader}>
@@ -498,6 +519,7 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
         </div>
         <Upload.Dragger
           multiple
+          disabled={uploading || !!workflowRunId}
           accept={INVOICE_EXTS.map((e) => `.${e}`).join(',')}
           showUploadList={false}
           beforeUpload={(file) => {
@@ -553,6 +575,7 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
         </div>
         <Upload.Dragger
           multiple
+          disabled={uploading || !!workflowRunId}
           accept={ATTACHMENT_EXTS.map((e) => `.${e}`).join(',')}
           showUploadList={false}
           beforeUpload={(file) => {
@@ -563,7 +586,7 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
           <p className="ant-upload-drag-icon"><InboxOutlined /></p>
           <p className="ant-upload-text">点击或拖拽附件文件到此处上传</p>
           <p className="ant-upload-hint">
-            支持 jpg / jpeg / png / pdf / doc / docx / xls / xlsx 格式，可关联到本次或已有发票并填写备注
+            支持 jpg / jpeg / png / pdf / doc / docx / xls / xlsx 格式，先上传本次发票后关联附件并填写备注
           </p>
         </Upload.Dragger>
         {attachmentRows.map((row) =>
@@ -574,11 +597,13 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
             <>
               <Select
                 size="small"
+                disabled={uploading}
+                aria-label={`${row.file.name}附件类型`}
                 style={{ width: 96 }}
                 value={row.category}
-                onChange={(category) => setAttachmentRows((prev) =>
+                onChange={(category) => { if (uploadingRef.current) return; setAttachmentRows((prev) =>
                   prev.map((r) => (r.uid === row.uid ? { ...r, category } : r))
-                )}
+                ); }}
                 options={(Object.keys(ATTACHMENT_CATEGORY_LABELS) as AttachmentCategory[]).map((c) => ({
                   value: c,
                   label: ATTACHMENT_CATEGORY_LABELS[c],
@@ -586,25 +611,28 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
               />
               <Select
                 size="small"
+                disabled={uploading}
                 showSearch
+                aria-label={`${row.file.name}关联发票`}
                 style={{ width: 230 }}
-                placeholder="选择关联发票"
+                placeholder={newOptions.length ? '选择本次上传的发票' : '先上传本次发票后关联'}
                 value={row.targetInvoiceId}
-                onChange={(targetInvoiceId) => setAttachmentRows((prev) =>
+                onChange={(targetInvoiceId) => { if (uploadingRef.current) return; setAttachmentRows((prev) =>
                   prev.map((r) => (r.uid === row.uid ? { ...r, targetInvoiceId } : r))
-                )}
+                ); }}
                 optionFilterProp="label"
-                options={invoiceOptions}
+                options={newOptions}
               />
               <Input
                 size="small"
+                disabled={uploading}
                 style={{ width: 130 }}
                 placeholder="备注"
                 value={row.note}
                 maxLength={200}
-                onChange={(e) => setAttachmentRows((prev) =>
+                onChange={(e) => { if (uploadingRef.current) return; setAttachmentRows((prev) =>
                   prev.map((r) => (r.uid === row.uid ? { ...r, note: e.target.value } : r))
-                )}
+                ); }}
               />
             </>,
             () => setAttachmentRows((prev) => prev.filter((r) => r.uid !== row.uid))

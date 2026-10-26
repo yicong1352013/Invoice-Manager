@@ -6,13 +6,15 @@
 
 /* Header Section */
 .pageHeader {
-  height: 72px;
+  min-height: 72px;
   background-color: var(--background);
   border-bottom: 1px solid var(--border);
   padding: var(--spacing-base) var(--spacing-2xl);
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--spacing-base);
 }
 
 .headerLeft {
@@ -29,7 +31,7 @@
   background-color: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  font-family: var(--font-secondary);
+  font-family: var(--font-sans);
   font-size: var(--font-size-sm);
   color: var(--foreground);
   cursor: pointer;
@@ -53,14 +55,14 @@
 }
 
 .invoiceNumber {
-  font-family: var(--font-primary);
+  font-family: var(--font-sans);
   font-size: var(--font-size-lg);
   font-weight: var(--font-weight-semibold);
   color: var(--foreground);
 }
 
 .invoiceMetadata {
-  font-family: var(--font-secondary);
+  font-family: var(--font-sans);
   font-size: var(--font-size-sm);
   color: var(--muted-foreground);
 }
@@ -69,50 +71,7 @@
   display: flex;
   align-items: center;
   gap: var(--spacing-md);
-}
-
-.rejectButton {
-  padding: var(--spacing-sm) var(--spacing-base);
-  background-color: var(--background);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  font-family: var(--font-secondary);
-  font-size: var(--font-size-sm);
-  color: var(--foreground);
-  cursor: pointer;
-  transition: all var(--transition-fast);
-}
-
-.rejectButton:hover {
-  border-color: var(--error);
-  color: var(--error);
-}
-
-.rejectButton:focus-visible {
-  outline: 2px solid var(--error);
-  outline-offset: 2px;
-}
-
-.confirmButton {
-  padding: var(--spacing-sm) var(--spacing-base);
-  background-color: var(--black-primary);
-  border: 1px solid var(--black-primary);
-  border-radius: var(--radius-md);
-  font-family: var(--font-secondary);
-  font-size: var(--font-size-sm);
-  color: var(--background);
-  cursor: pointer;
-  transition: all var(--transition-fast);
-}
-
-.confirmButton:hover {
-  background-color: #2D2D2D;
-  border-color: #2D2D2D;
-}
-
-.confirmButton:focus-visible {
-  outline: 2px solid var(--black-primary);
-  outline-offset: 2px;
+  flex-wrap: wrap;
 }
 
 /* Content Body */
@@ -147,7 +106,7 @@
 }
 
 .cardTitle {
-  font-family: var(--font-primary);
+  font-family: var(--font-sans);
   font-size: var(--font-size-md);
   font-weight: var(--font-weight-semibold);
   color: var(--foreground);
@@ -166,42 +125,6 @@
   padding: var(--spacing-lg);
 }
 
-/* Status Tag */
-.statusTag {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px var(--spacing-sm);
-  border-radius: var(--radius-base);
-  font-family: var(--font-secondary);
-  font-size: 11px;
-  font-weight: var(--font-weight-medium);
-}
-
-.statusTag.pending {
-  background-color: #FFF7ED;
-  color: var(--warning-dark);
-}
-
-.statusTag.processing {
-  background-color: #EFF6FF;
-  color: var(--info-dark);
-}
-
-.statusTag.success {
-  background-color: #F0FDF4;
-  color: var(--success-dark);
-}
-
-.statusTag.warning {
-  background-color: #FFFBEB;
-  color: var(--warning-dark);
-}
-
-.statusTag.error {
-  background-color: #FEF2F2;
-  color: var(--error-dark);
-}
-
 /* Comparison Table */
 .comparisonHeader {
   padding: var(--spacing-md) var(--spacing-base);
@@ -213,7 +136,7 @@
 }
 
 .matchStatus {
-  font-family: var(--font-secondary);
+  font-family: var(--font-sans);
   font-size: var(--font-size-sm);
   font-weight: var(--font-weight-medium);
   color: var(--foreground);
@@ -226,7 +149,7 @@
 
 .comparisonTable thead th {
   padding: var(--spacing-md) var(--spacing-base);
-  font-family: var(--font-secondary);
+  font-family: var(--font-sans);
   font-size: var(--font-size-sm);
   font-weight: var(--font-weight-medium);
   color: var(--muted-foreground);
@@ -237,7 +160,7 @@
 
 .comparisonTable tbody td {
   padding: var(--spacing-md) var(--spacing-base);
-  font-family: var(--font-secondary);
+  font-family: var(--font-sans);
   font-size: var(--font-size-sm);
   color: var(--foreground);
   border-bottom: 1px solid var(--border);
@@ -308,7 +231,7 @@
 }
 
 .previewTitle {
-  font-family: var(--font-primary);
+  font-family: var(--font-sans);
   font-size: var(--font-size-md);
   font-weight: var(--font-weight-semibold);
   color: var(--foreground);
@@ -351,7 +274,7 @@
   background-color: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-base);
-  font-family: var(--font-secondary);
+  font-family: var(--font-sans);
   font-size: var(--font-size-xs);
   color: var(--foreground);
   cursor: pointer;
@@ -380,49 +303,16 @@
   overflow: hidden;
 }
 
-/* Buttons */
-.actionButton {
-  padding: var(--spacing-sm) var(--spacing-base);
-  border-radius: var(--radius-md);
-  font-family: var(--font-secondary);
-  font-size: var(--font-size-sm);
-  cursor: pointer;
-  transition: all var(--transition-fast);
-  display: inline-flex;
-  align-items: center;
-  gap: var(--spacing-xs);
-  border: none;
-}
-
-.actionButton.primary {
-  background-color: var(--black-primary);
-  color: var(--background);
-}
-
-.actionButton.primary:hover {
-  background-color: #2D2D2D;
-}
-
-.actionButton.secondary {
-  background-color: var(--surface);
-  border: 1px solid var(--border);
-  color: var(--foreground);
-}
-
-.actionButton.secondary:hover {
-  background-color: var(--border);
-}
-
 /* Alert styling */
 .infoAlert {
   margin-bottom: var(--spacing-base);
   padding: var(--spacing-md);
-  background-color: #EFF6FF;
+  background-color: var(--primary-tint);
   border: 1px solid #BFDBFE;
   border-radius: var(--radius-md);
-  font-family: var(--font-secondary);
+  font-family: var(--font-sans);
   font-size: var(--font-size-sm);
-  color: #1E40AF;
+  color: var(--primary-hover);
 }
 
 /* Loading State */
@@ -464,7 +354,7 @@
 }
 
 .attachmentName:hover {
-  color: var(--red-primary);
+  color: var(--primary);
 }
 
 .attachmentSize {
@@ -477,11 +367,11 @@
 .rawPre {
   max-height: 420px;
   overflow: auto;
-  background: #fafafa;
-  border: 1px solid #e5e7eb;
-  border-radius: 6px;
-  padding: 12px;
-  font-size: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-base);
+  padding: var(--spacing-md);
+  font-size: var(--font-size-xs);
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-all;

@@ -242,7 +242,7 @@ class OCRService:
             logger.error(f"OCR processing failed: {e}")
             raise
 
-    def _extract_pdf_text_layer(self, pdf_data: bytes) -> tuple[str, bool]:
+    def _extract_pdf_text_layer(self, pdf_data: bytes) -> tuple:
         """Try to extract embedded text from PDF using pdfplumber.
 
         pdfplumber is more robust than pdftotext for complex PDF structures,
@@ -252,7 +252,7 @@ class OCRService:
             pdf_data: Raw PDF bytes
 
         Returns:
-            Tuple of (extracted_text, has_useful_text, raw_pre_cleanup_text)
+            Tuple of (extracted_text, has_useful_text, raw_pre_cleanup_text, positioned_words)
         """
         try:
             import pdfplumber
@@ -267,8 +267,9 @@ class OCRService:
             try:
                 all_text = []
                 raw_text_pages = []
+                all_lines = []
                 with pdfplumber.open(temp_pdf) as pdf:
-                    for page in pdf.pages:
+                    for page_index, page in enumerate(pdf.pages):
                         text = page.extract_text()
                         if text:
                             raw_text_pages.append(text)
@@ -279,6 +280,18 @@ class OCRService:
                                 line for line in (strip_cipher_tokens(l) for l in text.splitlines())
                                 if line.strip()
                             ))
+                            words = [(word['text'], None, [
+                                [word['x0'], word['top']], [word['x1'], word['top']],
+                                [word['x1'], word['bottom']], [word['x0'], word['bottom']],
+                            ]) for word in page.extract_words()]
+                            _, _, page_lines = self._build_line_items(words)
+                            for item in page_lines:
+                                offset = page_index * 1_000_000
+                                item['min_y'] += offset
+                                item['max_y'] += offset
+                                item['center_y'] += offset
+                                item['page_index'] = page_index
+                            all_lines.extend(page_lines)
 
                 combined_text = "\n".join(all_text)
 
@@ -297,13 +310,13 @@ class OCRService:
                 else:
                     logger.debug(f"PDF text extraction got {len(combined_text)} chars but no useful invoice data")
 
-                return combined_text, has_useful, "\n\n".join(raw_text_pages)
+                return combined_text, has_useful, "\n\n".join(raw_text_pages), all_lines
             finally:
                 os.unlink(temp_pdf)
 
         except Exception as e:
             logger.warning(f"PDF text layer extraction failed: {e}")
-            return "", False, None
+            return "", False, None, []
 
     def process_pdf(self, pdf_data: bytes) -> Tuple[str, Optional[float], List[Dict[str, Any]], Optional[str]]:
         """Process PDF and extract text from all pages.
@@ -321,12 +334,12 @@ class OCRService:
         # First try to extract embedded text layer (in-process engine only —
         # see prefer_text_layer)
         if self.prefer_text_layer:
-            text_layer, has_useful_text, raw_layer = self._extract_pdf_text_layer(pdf_data)
+            text_layer, has_useful_text, raw_layer, text_lines = self._extract_pdf_text_layer(pdf_data)
 
             if has_useful_text:
                 logger.info("Using PDF embedded text layer instead of OCR")
                 # High confidence for embedded text
-                return text_layer, 99.0, [], raw_layer
+                return text_layer, 99.0, text_lines, raw_layer
 
         # Fall back to OCR for scanned PDFs
         logger.info("PDF has no useful text layer, falling back to OCR")
@@ -544,6 +557,7 @@ class RemotePaddleOCRService(OCRService):
                 item["min_y"] += offset
                 item["max_y"] += offset
                 item["center_y"] += offset
+                item["page_index"] = page_index
                 all_lines.append(item)
             all_confidences.extend(confidences)
 
@@ -560,6 +574,8 @@ class FieldExtractor:
     # This causes buyer/seller info to be mixed. We use position-based extraction.
     PATTERNS_CN = {
         'invoice_number': r'发票号码[：:]\s*(\d+)',
+        # Both older VAT titles and digital titles may share a row with the invoice code.
+        'invoice_type': r'^[ \t]*([\u4e00-\u9fff]{2,24}发票(?:[ \t]*[（(][^（()）]{2,20}[)）])?)(?=[ \t]|发票代码|发票号码|$)',
         'invoice_code': r'发票代码[：:]\s*(\d+)',
         'issue_date': r'开票日期[：:]\s*(\d{4}年\d{1,2}月\d{1,2}日|\d{4}-\d{1,2}-\d{1,2})',
         # For buyer/seller, we use special extraction in extract_fields() method
@@ -574,9 +590,15 @@ class FieldExtractor:
         'item_name': r'\*([^*\n]+(?:\*[^*\n]+)*)',
         # [¥￥Y□]: ¥ is sometimes misrecognized as Y or □ by OCR
         'total_with_tax': r'(?:小写|价税合计)[）)（(]*\s*[¥￥Y□]?\s*([\d][\d,.]*)',
+        # 价税合计（大写）后的汉字金额，可能有◎○〇围符
+        'total_with_tax_cn': r'[（(]大写[）)]\s*[◎○〇]?\s*([壹贰叁肆伍陆柒捌玖拾佰仟万亿零元圆整角分]+)',
         'amount': r'(?:合\s*计|金\s*额)\s*[¥￥Y□]?\s*([\d][\d,.]*)',
         'tax_amount': r'(?:税\s*额\s*[¥￥Y□]?\s*([\d,.]+)|[¥￥Y□]\s*[\d,.]+\s*[¥￥Y□]\s*([\d,.]+))',
         'tax_rate': None,  # Table headers and values may be on separate OCR lines
+        # 行首"备注："整行（保守匹配，数电票备注区常无冒号，交给LLM兜底）
+        'remark': r'^\s*备\s*注\s*[：:]\s*(.+)$',
+        # 票尾"开票人：姓名"，姓名2-4个汉字
+        'drawer': r'开\s*票\s*人\s*[：:]\s*([\u4e00-\u9fff]{2,4})',
     }
 
     # Regex patterns for English invoice fields
@@ -660,6 +682,21 @@ class FieldExtractor:
                 positions['buyer'].append(line)
             if any(label in text for label in seller_labels) or any(re.search(pat, text) for pat in seller_patterns):
                 positions['seller'].append(line)
+
+        for party, label in (('buyer', '购买方'), ('seller', '销售方')):
+            for first in (line for line in lines if self._normalize_line_text(line['text']) == label[0]):
+                characters = [first]
+                height = first['max_y'] - first['min_y']
+                for char in label[1:]:
+                    candidates = [line for line in lines if self._normalize_line_text(line['text']) == char
+                                  and abs(line['center_x'] - first['center_x']) < height
+                                  and 0 < line['center_y'] - characters[-1]['center_y'] < height * 4]
+                    if not candidates:
+                        break
+                    characters.append(min(candidates, key=lambda line: line['center_y']))
+                if len(characters) == len(label):
+                    positions[party].append({**first, 'text': label,
+                                             'center_y': sum(line['center_y'] for line in characters) / len(characters)})
 
         return positions
 
@@ -1047,6 +1084,142 @@ class FieldExtractor:
 
         return result
 
+    def _extract_party_details(self, text: str, lines: List[Dict[str, Any]]) -> Dict[str, Any]:
+        patterns = {
+            'address_phone': r'^\s*地\s*址[、，,]?\s*电\s*话[：:][ \t]*(.*)$',
+            'bank_account': r'^\s*开户行及[账帐]号[：:][ \t]*(.*)$',
+        }
+        values: Dict[str, list] = {
+            f'{party}_{field}': [] for party in ('buyer', 'seller') for field in patterns
+        }
+        labels = self._find_label_positions_from_lines(lines)
+        for line in lines:
+            if not self._normalize_line_text(line['text']).startswith(('地', '开户')):
+                continue
+            party = self._classify_line_by_labels(line, labels)
+            if not party:
+                continue
+            row_text = line['text']
+            right = line['max_x']
+            height = line['max_y'] - line['min_y']
+            neighbors = sorted((other for other in lines if other['min_x'] > line['min_x']
+                                and abs(other['center_y'] - line['center_y']) < height / 2),
+                               key=lambda other: other['min_x'])
+            for other in neighbors:
+                if other['min_x'] - right > height * 2 or self._classify_line_by_labels(other, labels) != party:
+                    break
+                row_text += ' ' + other['text']
+                right = other['max_x']
+            for field, pattern in patterns.items():
+                match = re.match(pattern, row_text)
+                if match:
+                    values[f'{party}_{field}'].append(match.group(1).strip() or None)
+
+        # Plain text is safe only inside an explicit, non-interleaved party section.
+        party_pattern = r'购\s*买\s*方|购方|购货单位|购\s*名\s*称|销\s*售\s*方|销方|销货单位|销\s*名\s*称'
+        party = None
+        for row in text.splitlines():
+            markers = re.findall(party_pattern, row)
+            if markers:
+                parties = {'buyer' if marker.startswith('购') else 'seller' for marker in markers}
+                party = parties.pop() if len(parties) == 1 else None
+            if party:
+                for field, pattern in patterns.items():
+                    key = f'{party}_{field}'
+                    match = re.match(pattern, row)
+                    if match and not values[key]:
+                        values[key].append(match.group(1).strip() or None)
+        return {key: self._clean_chinese_spaces(items[0]) if items and items[0]
+                and len(set(items)) == 1 else None for key, items in values.items()}
+
+    def _extract_table_fields(self, lines: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Read one unambiguous invoice item using its header columns."""
+        result = dict.fromkeys(('specification', 'unit', 'quantity', 'unit_price'))
+        labels = {
+            '项目名称': 'item_name', '货物或应税劳务、服务名称': 'item_name',
+            '货物或应税劳务服务名称': 'item_name', '规格型号': 'specification',
+            '单位': 'unit', '数量': 'quantity', '单价': 'unit_price',
+            '金额': 'amount', '税率': 'tax_rate', '税额': 'tax_amount',
+        }
+        headers = []
+        for line in lines:
+            text = self._normalize_line_text(line['text'])
+            header = line
+            if text not in labels and any(label.startswith(text) for label in labels):
+                height = line['max_y'] - line['min_y']
+                neighbors = sorted((other for other in lines
+                                    if other['min_x'] > line['min_x']
+                                    and abs(other['center_y'] - line['center_y']) < height / 2),
+                                   key=lambda other: other['min_x'])
+                for other in neighbors[:3]:
+                    if other['min_x'] - header['max_x'] > height * 2:
+                        break
+                    text += self._normalize_line_text(other['text'])
+                    header = {**header, 'max_x': other['max_x'],
+                              'center_x': (line['min_x'] + other['max_x']) / 2}
+                    if text in labels or not any(label.startswith(text) for label in labels):
+                        break
+            if text in labels:
+                headers.append((labels[text], header))
+        name_headers = [line for name, line in headers if name == 'item_name']
+        if len(name_headers) != 1:
+            return result
+        anchor = name_headers[0]
+        header_height = anchor['max_y'] - anchor['min_y']
+        headers = sorted(
+            [(name, line) for name, line in headers
+             if abs(line['center_y'] - anchor['center_y']) <= header_height],
+            key=lambda pair: pair[1]['center_x'],
+        )
+        if len(headers) < 3:
+            return result
+        footer_rows = []
+        for line in lines:
+            if line['center_y'] <= anchor['center_y'] or not self._normalize_line_text(line['text']).startswith(('合', '价税合计', '销售方')):
+                continue
+            row_text = ''.join(other['text'] for other in sorted(lines, key=lambda item: item['min_x'])
+                               if abs(other['center_y'] - line['center_y']) < header_height / 2)
+            if re.match(r'^(?:合计|价税合计|销售方)', self._normalize_line_text(row_text)):
+                footer_rows.append(line['center_y'])
+        bottom = min(footer_rows, default=float('inf'))
+        rows: List[List[Dict[str, Any]]] = []
+        for line in sorted(lines, key=lambda item: (item['center_y'], item['min_x'])):
+            if not anchor['center_y'] + header_height < line['center_y'] < bottom:
+                continue
+            if not rows or abs(line['center_y'] - rows[-1][0]['center_y']) > header_height:
+                rows.append([])
+            rows[-1].append(line)
+        if not rows:
+            return result
+        cells = {}
+        for index, (name, header) in enumerate(headers):
+            left = ((headers[index - 1][1]['center_x'] + header['center_x']) / 2
+                    if index else float('-inf'))
+            right = ((headers[index + 1][1]['center_x'] + header['center_x']) / 2
+                     if index + 1 < len(headers) else float('inf'))
+            values = sorted((line for line in rows[0] if left < line['center_x'] <= right),
+                            key=lambda line: line['min_x'])
+            cells[name] = ' '.join(line['text'] for line in values).strip() or None
+        item_name = (cells.get('item_name') or '').lstrip('*').strip()
+        if is_valid_item_name(item_name):
+            result['item_name'] = self._clean_chinese_spaces(item_name)
+        # shortcut: flat invoice fields represent a single item, add item rows before aggregating multiple items.
+        if len(rows) != 1 or len({line.get('page_index', 0) for line in lines}) != 1:
+            return result
+        numeric_headers = {'quantity', 'unit_price', 'amount'} <= {name for name, _ in headers}
+        for name in result.keys() - {'item_name'}:
+            value = cells.get(name)
+            if name in ('quantity', 'unit_price') and value:
+                if not numeric_headers:
+                    continue
+                value = value.replace(',', '')
+                if not re.fullmatch(r'[+-]?\d+(?:\.\d+)?', value):
+                    continue
+            if name == 'unit' and value and re.search(r'\s', value):
+                continue
+            result[name] = value
+        return result
+
     def extract_fields(self, text: str, lines: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         """Extract all invoice fields from OCR text.
 
@@ -1078,7 +1251,10 @@ class FieldExtractor:
 
             try:
                 match = next((
-                    candidate for candidate in re.finditer(pattern, text, re.IGNORECASE | re.MULTILINE)
+                    candidate for candidate in re.finditer(
+                        pattern, '\n'.join(text.splitlines()[:4]) if field_name == 'invoice_type' else text,
+                        re.IGNORECASE | re.MULTILINE,
+                    )
                     if field_name != 'item_name' or is_valid_item_name(candidate.group(1))
                 ), None)
                 if match:
@@ -1098,6 +1274,14 @@ class FieldExtractor:
 
         # For Chinese invoices, use position-based extraction for buyer/seller
         if is_chinese:
+            table_fields = self._extract_table_fields(lines or [])
+            fields.update(table_fields)
+            fields.update(self._extract_party_details(text, lines or []))
+            if 'item_name' not in table_fields and re.search(r'数\s*量|单\s*价', text) and re.search(
+                r'(?:[ \t]+[+-]?\d+(?:\.\d+)?%?){3,}$', fields.get('item_name') or ''
+            ):
+                # Without an unambiguous column mapping a merged row is not a trustworthy item name.
+                fields['item_name'] = None
             buyer_seller = self._extract_buyer_seller(text, lines)
             fields['buyer_name'] = buyer_seller['buyer_name']
             fields['buyer_tax_id'] = buyer_seller['buyer_tax_id']
@@ -1156,7 +1340,8 @@ class FieldExtractor:
             return self._parse_currency(value)
 
         # Clean Chinese text fields (remove extra spaces)
-        if field_name in ['buyer_name', 'seller_name', 'item_name']:
+        if field_name in ['buyer_name', 'seller_name', 'item_name',
+                          'invoice_type', 'total_with_tax_cn', 'drawer', 'remark']:
             return self._clean_chinese_spaces(value)
 
         return value

@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from app.services.llm_service import LLMService
 
 
@@ -59,3 +61,16 @@ def test_llm_response_invalid_fields_to_none():
     assert fields["amount"] is None
     assert fields["tax_amount"] is None
     assert fields["tax_rate"] is None
+
+
+@pytest.mark.parametrize('field', ['quantity', 'unit_price'])
+@pytest.mark.parametrize('raw, expected', [
+    ('1,000', '1000'), ('￥1，234.5000', '1234.5'), ('0', '0'),
+    ('-2.5000', '-2.5'), ('99999999.9999', '99999999.9999'),
+    ('1.' + '0' * 100, '1'),
+    ('不适用', None), ('NaN', None), ('Infinity', None), ('12件', None),
+    ('100000000', None), ('0.00001', None),
+])
+def test_optional_numbers_must_fit_invoice_storage_without_losing_precision(field, raw, expected):
+    fields = LLMService()._parse_json_response(json.dumps({field: raw}), 'test')
+    assert fields[field] == expected

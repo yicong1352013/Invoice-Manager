@@ -6,6 +6,8 @@ import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import date
+from decimal import Decimal, InvalidOperation
 from typing import Optional, Dict, Any, List, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
@@ -31,19 +33,35 @@ _ocr_executor = ThreadPoolExecutor(max_workers=settings.ocr_max_workers)
 _llm_executor = ThreadPoolExecutor(max_workers=settings.llm_max_workers)
 logger.info(f"Initialized thread pools: OCR={settings.ocr_max_workers}, LLM={settings.llm_max_workers}")
 
-# Fields to compare between OCR and LLM
+# Fields to compare between OCR and LLM. Also the AI校验 verified set:
+# ai-verify builds current_values from this list and parse_verify_response
+# only accepts these names — keep prompts.VERIFY_FIELD_LABELS in sync.
+# Order drives the diff/verify display order.
 COMPARABLE_FIELDS = [
     'invoice_number',
+    'invoice_type',
+    'invoice_code',
     'issue_date',
     'buyer_name',
     'buyer_tax_id',
+    'buyer_address_phone',
+    'buyer_bank_account',
     'seller_name',
     'seller_tax_id',
+    'seller_address_phone',
+    'seller_bank_account',
     'item_name',
+    'specification',
+    'unit',
+    'quantity',
+    'unit_price',
     'total_with_tax',
+    'total_with_tax_cn',
     'amount',
     'tax_amount',
     'tax_rate',
+    'remark',
+    'drawer',
 ]
 
 # Fields that must all be present for the OCR result to count as sufficient
@@ -112,6 +130,12 @@ def _run_ocr(
     else:
         raw_text, confidence, ocr_lines, raw_response = ocr_service.process_image(file_data)
     fields = extractor.extract_fields(raw_text, ocr_lines)
+    if file_type == 'pdf' and paddle_endpoint:
+        # The embedded header can supply letters missed by OCR without replacing its audit evidence.
+        pdf_text, _, _, _ = ocr_service._extract_pdf_text_layer(file_data)
+        title = extractor.extract_fields('\n'.join(pdf_text.splitlines()[:4])).get('invoice_type')
+        if title:
+            fields['invoice_type'] = title
     return OcrOutcome(engine=engine_name, raw_text=raw_text, confidence=confidence,
                       fields=fields, raw_response=raw_response)
 
@@ -295,22 +319,12 @@ async def process_invoice(invoice_id: int, db: AsyncSession) -> bool:
         has_llm = _has_meaningful_fields(llm_fields)
         logger.info(f"LLM fallback completed (has_llm={has_llm})")
 
-        # Save OCR result
+        # Save OCR result (all comparable fields exist as string columns)
         ocr_result = OcrResult(
             invoice_id=invoice_id,
             raw_text=outcome.raw_text,
             raw_response=outcome.raw_response,
-            invoice_number=outcome.fields.get('invoice_number'),
-            issue_date=outcome.fields.get('issue_date'),
-            buyer_name=outcome.fields.get('buyer_name'),
-            buyer_tax_id=outcome.fields.get('buyer_tax_id'),
-            seller_name=outcome.fields.get('seller_name'),
-            seller_tax_id=outcome.fields.get('seller_tax_id'),
-            item_name=outcome.fields.get('item_name'),
-            total_with_tax=outcome.fields.get('total_with_tax'),
-            amount=outcome.fields.get('amount'),
-            tax_amount=outcome.fields.get('tax_amount'),
-            tax_rate=outcome.fields.get('tax_rate'),
+            **{name: outcome.fields.get(name) for name in COMPARABLE_FIELDS},
         )
         db.add(ocr_result)
 
@@ -318,17 +332,7 @@ async def process_invoice(invoice_id: int, db: AsyncSession) -> bool:
         if has_llm:
             llm_result = LlmResult(
                 invoice_id=invoice_id,
-                invoice_number=llm_fields.get('invoice_number'),
-                issue_date=llm_fields.get('issue_date'),
-                buyer_name=llm_fields.get('buyer_name'),
-                buyer_tax_id=llm_fields.get('buyer_tax_id'),
-                seller_name=llm_fields.get('seller_name'),
-                seller_tax_id=llm_fields.get('seller_tax_id'),
-                item_name=llm_fields.get('item_name'),
-                total_with_tax=llm_fields.get('total_with_tax'),
-                amount=llm_fields.get('amount'),
-                tax_amount=llm_fields.get('tax_amount'),
-                tax_rate=llm_fields.get('tax_rate'),
+                **{name: llm_fields.get(name) for name in COMPARABLE_FIELDS},
             )
             db.add(llm_result)
 
@@ -452,7 +456,7 @@ def _normalize_value(value: Any) -> Optional[str]:
 
 
 # Fields that should be compared as numbers
-NUMERIC_FIELDS = ['total_with_tax', 'amount', 'tax_amount']
+NUMERIC_FIELDS = ['total_with_tax', 'amount', 'tax_amount', 'quantity', 'unit_price']
 
 
 def _values_are_equal(field_name: str, value1: Optional[str], value2: Optional[str]) -> bool:
@@ -493,12 +497,9 @@ def _values_are_equal(field_name: str, value1: Optional[str], value2: Optional[s
 
 
 def _update_invoice_from_fields(invoice: Invoice, fields: dict) -> None:
-    """Update invoice fields from extracted data."""
+    """Update invoice fields from extracted data (values are strings or None)."""
     from datetime import datetime
     from decimal import Decimal
-
-    if fields.get('invoice_number'):
-        invoice.invoice_number = fields['invoice_number']
 
     if fields.get('issue_date'):
         try:
@@ -506,46 +507,66 @@ def _update_invoice_from_fields(invoice: Invoice, fields: dict) -> None:
         except ValueError:
             pass
 
-    if fields.get('buyer_name'):
-        invoice.buyer_name = fields['buyer_name']
+    # String columns shared by the header/item fields
+    for name in (
+        'invoice_number', 'invoice_type', 'invoice_code',
+        'buyer_name', 'buyer_tax_id', 'buyer_address_phone', 'buyer_bank_account',
+        'seller_name', 'seller_tax_id', 'seller_address_phone', 'seller_bank_account',
+        'item_name', 'specification', 'unit', 'total_with_tax_cn',
+        'tax_rate', 'remark', 'drawer',
+    ):
+        if fields.get(name):
+            setattr(invoice, name, fields[name])
 
-    if fields.get('buyer_tax_id'):
-        invoice.buyer_tax_id = fields['buyer_tax_id']
-
-    if fields.get('seller_name'):
-        invoice.seller_name = fields['seller_name']
-
-    if fields.get('seller_tax_id'):
-        invoice.seller_tax_id = fields['seller_tax_id']
-
-    if fields.get('item_name'):
-        invoice.item_name = fields['item_name']
-
-    if fields.get('total_with_tax'):
-        try:
-            invoice.total_with_tax = Decimal(fields['total_with_tax'])
-        except (ValueError, TypeError):
-            pass
-
-    if fields.get('amount'):
-        try:
-            invoice.amount = Decimal(fields['amount'])
-        except (ValueError, TypeError):
-            pass
-
-    if fields.get('tax_amount'):
-        try:
-            invoice.tax_amount = Decimal(fields['tax_amount'])
-        except (ValueError, TypeError):
-            pass
-
-    if fields.get('tax_rate'):
-        invoice.tax_rate = fields['tax_rate']
+    # Decimal columns
+    for name in ('total_with_tax', 'amount', 'tax_amount', 'quantity', 'unit_price'):
+        if fields.get(name):
+            try:
+                value = Decimal(str(fields[name]).replace(',', '').replace('，', ''))
+                if not value.is_finite():
+                    continue
+                if name in ('quantity', 'unit_price') and (
+                    abs(value) >= Decimal('100000000') or value != value.quantize(Decimal('0.0001'))
+                ):
+                    continue
+                setattr(invoice, name, value)
+            except (InvalidOperation, ValueError, TypeError):
+                pass
 
 
 # --- AI verification (detail-page "AI校验") -----------------------------------
 
 _VERIFY_STATUSES = {"correct", "incorrect", "unsure"}
+_VERIFY_WARNING_FIELDS = {
+    "buyer_address_phone", "buyer_bank_account", "seller_address_phone", "seller_bank_account",
+    "specification", "unit", "quantity", "unit_price", "total_with_tax_cn", "remark", "drawer",
+}
+_VERIFY_CONDITIONAL_FIELDS = {"invoice_type", "invoice_code"}
+_VERIFY_NUMERIC_FIELDS = {"quantity", "unit_price", "amount", "tax_amount", "total_with_tax"}
+_VERIFY_WIDTH_TRANSLATION = {0x3000: 0x20, **{code: code - 0xFEE0 for code in range(0xFF01, 0xFF5F)}}
+
+
+def _verify_values_equivalent(name: str, current: Any, corrected: str) -> bool:
+    if current is None:
+        return False
+    left = str(current).translate(_VERIFY_WIDTH_TRANSLATION).strip()
+    right = corrected.translate(_VERIFY_WIDTH_TRANSLATION).strip()
+    if not left or not right:
+        return False
+    if name in _VERIFY_NUMERIC_FIELDS:
+        try:
+            a, b = Decimal(left), Decimal(right)
+            return a.is_finite() and b.is_finite() and a == b
+        except InvalidOperation:
+            return False
+    if name == "issue_date":
+        try:
+            return date.fromisoformat(left) == date.fromisoformat(right)
+        except ValueError:
+            return False
+    if name == "item_name":
+        left, right = left.removeprefix("*").strip(), right.removeprefix("*").strip()
+    return left == right
 
 
 def build_verify_prompt(current_values: Dict[str, Any], ocr_text: Optional[str]) -> str:
@@ -561,7 +582,7 @@ def build_verify_prompt(current_values: Dict[str, Any], ocr_text: Optional[str])
     )
 
 
-def parse_verify_response(content: str) -> Dict[str, Any]:
+def parse_verify_response(content: str, current_values: Dict[str, Any]) -> Dict[str, Any]:
     """Parse + normalize the LLM verification verdict.
 
     Invariants:
@@ -569,7 +590,7 @@ def parse_verify_response(content: str) -> Dict[str, Any]:
     - Every comparable field gets a verdict; missing entries become 'unsure'.
     - status is normalized to correct/incorrect/unsure; anything else is 'unsure'.
     - corrected_value is kept only for 'incorrect' verdicts with a non-empty value.
-    - overall is recomputed from the verdicts, never trusted from the model.
+    - Severity and overall are computed locally; auxiliary differences only warn.
     """
     if content.startswith("```"):
         content = content.split("```")[1]
@@ -609,11 +630,34 @@ def parse_verify_response(content: str) -> Dict[str, Any]:
         by_field.get(name, {"field": name, "status": "unsure", "corrected_value": None, "reason": None})
         for name in COMPARABLE_FIELDS
     ]
-    overall = "issues" if any(f["status"] != "correct" for f in fields) else "pass"
+    for item in fields:
+        name, status = item["field"], item["status"]
+        if status == "incorrect" and item["corrected_value"] is not None and _verify_values_equivalent(
+            name, current_values.get(name), item["corrected_value"]
+        ):
+            item.update(status="correct", corrected_value=None, reason="仅格式差异，与当前值等价")
+            status = "correct"
+        if status == "correct":
+            item["severity"] = "none"
+        elif name in _VERIFY_WARNING_FIELDS or (
+            name in _VERIFY_CONDITIONAL_FIELDS and (
+                status == "unsure" or not str(current_values.get(name) or "").strip()
+            )
+        ):
+            item["severity"] = "warning"
+        else:
+            item["severity"] = "blocking"
+    blocking = sum(item["severity"] == "blocking" for item in fields)
+    warnings = sum(item["severity"] == "warning" for item in fields)
+    overall = "issues" if blocking else "pass"
+    if blocking:
+        summary = f"需处理 {blocking} 个关键问题" + (f"，另有 {warnings} 项提示" if warnings else "")
+    else:
+        summary = f"审核通过，含 {warnings} 项提示" if warnings else "审核通过，各字段与原件一致"
     return {
         "overall": overall,
         "fields": fields,
-        "summary": str(data.get("summary") or "").strip() or None,
+        "summary": summary,
     }
 
 
@@ -657,7 +701,7 @@ def run_ai_verify(
         raise RuntimeError(f"LLM调用失败: {e}") from e
 
     try:
-        verdict = parse_verify_response(content)
+        verdict = parse_verify_response(content, current_values)
     except ValueError as e:
         raise RuntimeError(f"AI返回内容无法解析: {e}") from e
 

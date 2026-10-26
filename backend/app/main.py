@@ -14,6 +14,9 @@ from app.routers import (
     logs as logs_router,
     settings as settings_router,
     users as users_router,
+    export_templates,
+    notification_channels,
+    workflows,
 )
 from app.rate_limit import limiter
 
@@ -61,6 +64,25 @@ _SCHEMA_PATCHES = [
     "ALTER TYPE invoicestatus ADD VALUE IF NOT EXISTS 'FAILED'",
 ]
 
+# 数电票票面表头字段：Invoice / OcrResult / LlmResult 三表统一补列。
+# OcrResult/LlmResult 存字符串值，与 Invoice 的类型保持同宽。
+_HEADER_FIELD_DDL = {
+    "invoice_type": "VARCHAR(100)",
+    "invoice_code": "VARCHAR(50)",
+    "buyer_address_phone": "VARCHAR(255)",
+    "buyer_bank_account": "VARCHAR(255)",
+    "seller_address_phone": "VARCHAR(255)",
+    "seller_bank_account": "VARCHAR(255)",
+    "total_with_tax_cn": "VARCHAR(200)",
+    "remark": "TEXT",
+    "drawer": "VARCHAR(50)",
+}
+_SCHEMA_PATCHES += [
+    f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {name} {ddl}"
+    for table in ("invoices", "ocr_results", "llm_results")
+    for name, ddl in _HEADER_FIELD_DDL.items()
+]
+
 
 async def _recover_stuck_processing() -> None:
     """Reset invoices stuck in 解析中 (server died mid-recognition).
@@ -74,9 +96,14 @@ async def _recover_stuck_processing() -> None:
     from app.database import async_session_maker
     from app.models.audit_log import AuditLog
     from app.models.invoice import Invoice, InvoiceStatus
+    from app.models.workflow import WorkflowRun, WorkflowRunItem
 
     async with async_session_maker() as db:
-        result = await db.execute(select(Invoice).where(Invoice.status == InvoiceStatus.PROCESSING))
+        managed = select(WorkflowRunItem.id).join(WorkflowRun).where(
+            WorkflowRunItem.invoice_id == Invoice.id,
+            WorkflowRun.state.notin_(["completed", "cancelled"]),
+        ).exists()
+        result = await db.execute(select(Invoice).where(Invoice.status == InvoiceStatus.PROCESSING, ~managed))
         stuck = result.scalars().all()
         for inv in stuck:
             inv.status = InvoiceStatus.FAILED
@@ -99,6 +126,7 @@ async def _startup_init() -> None:
     from app.models.attachment import Attachment  # noqa: F401
     from app.models.provider import AppSetting, LlmProvider  # noqa: F401
     from app.models.user import User  # noqa: F401
+    from app.models import workflow  # noqa: F401
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -115,6 +143,9 @@ async def _startup_init() -> None:
     from app.services.provider_service import ensure_provider_seeded
     async with async_session_maker() as db:
         await ensure_provider_seeded(db)
+        from app.services.excel_template_service import ensure_default_template
+        await ensure_default_template(db)
+        await db.commit()
     await _recover_stuck_processing()
 
 
@@ -169,6 +200,9 @@ app.include_router(invoices.router, prefix="/api/invoices", tags=["Invoices"])
 app.include_router(attachments_router.router, prefix="/api/attachments", tags=["Attachments"])
 app.include_router(settings_router.router, prefix="/api/settings", tags=["Settings"])
 app.include_router(logs_router.router, prefix="/api/logs", tags=["Logs"])
+app.include_router(export_templates.router, prefix="/api/export-templates", tags=["Export templates"])
+app.include_router(notification_channels.router, prefix="/api/notification-channels", tags=["Notification channels"])
+app.include_router(workflows.router, prefix="/api", tags=["Workflows"])
 
 # MCP endpoint (streamable HTTP, gated on mcp_enabled + token in settings).
 # Mounted at /api with internal path /mcp => agents connect to /api/mcp.

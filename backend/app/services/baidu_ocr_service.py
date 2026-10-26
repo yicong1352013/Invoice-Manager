@@ -23,22 +23,33 @@ VAT_INVOICE_URL = "https://aip.baidubce.com/rest/2.0/ocr/v1/vat_invoice"
 # Baidu word-result key -> our field name (unmapped keys stay in raw text only)
 _FIELD_MAP = {
     "InvoiceNum": "invoice_number",
+    "InvoiceType": "invoice_type",
+    "InvoiceCode": "invoice_code",
     "InvoiceDate": "issue_date",
     "SellerName": "seller_name",
     "SellerRegisterNum": "seller_tax_id",
+    "SellerAddress": "seller_address_phone",
+    "SellerBank": "seller_bank_account",
     "PurchaserName": "buyer_name",
     "PurchaserRegisterNum": "buyer_tax_id",
+    "PurchaserAddress": "buyer_address_phone",
+    "PurchaserBank": "buyer_bank_account",
     "AmountInFiguers": "total_with_tax",      # 价税合计(小写)
+    "AmountInWords": "total_with_tax_cn",     # 价税合计(大写)
     "TotalAmount": "amount",                  # 合计金额(不含税)
     "TotalTax": "tax_amount",                 # 合计税额
     "TaxRate": "tax_rate",
+    "Remarks": "remark",
+    "NoteDrawer": "drawer",                   # 开票人
 }
 
 # Fields we surface from the structured response
 _EXTRACT_FIELDS = [
-    "invoice_number", "issue_date", "buyer_name", "buyer_tax_id",
-    "seller_name", "seller_tax_id", "total_with_tax", "amount",
-    "tax_amount", "tax_rate", "item_name",
+    "invoice_number", "invoice_type", "invoice_code", "issue_date",
+    "buyer_name", "buyer_tax_id", "buyer_address_phone", "buyer_bank_account",
+    "seller_name", "seller_tax_id", "seller_address_phone", "seller_bank_account",
+    "total_with_tax", "total_with_tax_cn", "amount",
+    "tax_amount", "tax_rate", "remark", "drawer", "item_name",
 ]
 
 

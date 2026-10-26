@@ -23,9 +23,12 @@ export default function Sidebar({ user, onLogout, llmConfigured, collapsed, onTo
 
   const navItems = [
     { path: '/', label: '发票列表' },
+    { path: '/workflows', label: '工作流' },
 
     ...(user.role === 'admin'
       ? [
+          { path: '/export-templates', label: '导出模板' },
+          { path: '/settings/notification-channels', label: '通知渠道' },
           { path: '/logs', label: '系统日志' },
           { path: '/settings', label: '设置' },
         ]
@@ -38,7 +41,7 @@ export default function Sidebar({ user, onLogout, llmConfigured, collapsed, onTo
       <div className={styles.sidebarTop}>
         {/* Logo + collapse toggle */}
         <div className={styles.logo}>
-          <div className={styles.logoMark} />
+          <img className={styles.logoMark} src="/favicon.svg" alt="发票管理" />
           {!collapsed && <span className={styles.logoText}>发票管理</span>}
           {!collapsed && (
             <button

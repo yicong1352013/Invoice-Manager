@@ -20,7 +20,7 @@
 }
 
 .pageTitle {
-  font-family: var(--font-primary);
+  font-family: var(--font-sans);
   font-size: 32px;
   font-weight: var(--font-weight-semibold);
   color: var(--foreground);
@@ -29,7 +29,7 @@
 }
 
 .pageSubtitle {
-  font-family: var(--font-secondary);
+  font-family: var(--font-sans);
   font-size: var(--font-size-base);
   color: var(--muted-foreground);
   margin: 0;
@@ -40,27 +40,6 @@
   display: flex;
   gap: var(--spacing-md);
   align-items: center;
-}
-
-.secondaryButton {
-  background-color: var(--background);
-  border: 1px solid var(--border);
-  color: var(--foreground);
-}
-
-.secondaryButton:hover {
-  background-color: var(--surface);
-  border-color: var(--gray-400);
-}
-
-.primaryButton {
-  background-color: var(--black-primary);
-  color: var(--background);
-  border: none;
-}
-
-.primaryButton:hover {
-  background-color: #1a1a1a;
 }
 
 /* Metrics Section */
@@ -86,31 +65,6 @@
   overflow: hidden;
 }
 
-.invoiceTable :global(.ant-table-thead > tr > th) {
-  background-color: var(--surface);
-  padding: 14px 20px;
-  font-family: var(--font-secondary);
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-medium);
-  color: var(--foreground);
-}
-
-.invoiceTable :global(.ant-table-tbody > tr > td) {
-  padding: 16px 20px;
-  border-bottom: 1px solid var(--border);
-  font-family: var(--font-secondary);
-  font-size: var(--font-size-sm);
-  color: var(--foreground);
-}
-
-.invoiceTable :global(.ant-table-tbody > tr:last-child > td) {
-  border-bottom: none;
-}
-
-.invoiceTable :global(.ant-table-tbody > tr:hover > td) {
-  background-color: var(--surface);
-}
-
 /* Pagination Row */
 .paginationRow {
   display: flex;
@@ -128,7 +82,7 @@
 }
 
 .paginationText {
-  font-family: var(--font-secondary);
+  font-family: var(--font-sans);
   font-size: var(--font-size-sm);
   color: var(--muted-foreground);
 }
@@ -140,7 +94,7 @@
 }
 
 .pageNumbers {
-  font-family: var(--font-secondary);
+  font-family: var(--font-sans);
   font-size: var(--font-size-sm);
   color: var(--foreground);
   padding: 0 var(--spacing-md);

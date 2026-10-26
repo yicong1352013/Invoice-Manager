@@ -32,12 +32,11 @@
 .logoMark {
   width: 28px;
   height: 28px;
-  background-color: var(--red-primary);
-  border-radius: var(--radius-base);
+  display: block;
 }
 
 .logoText {
-  font-family: var(--font-primary);
+  font-family: var(--font-sans);
   font-size: var(--font-size-lg);
   font-weight: var(--font-weight-semibold);
   color: var(--foreground);
@@ -65,7 +64,7 @@
 }
 
 .navItem:focus-visible {
-  outline: 2px solid var(--red-primary);
+  outline: 2px solid var(--primary);
   outline-offset: 2px;
 }
 
@@ -78,11 +77,11 @@
 }
 
 .navItem.active .navDot {
-  background-color: var(--red-primary);
+  background-color: var(--primary);
 }
 
 .navLabel {
-  font-family: var(--font-primary);
+  font-family: var(--font-sans);
   font-size: var(--font-size-base);
   font-weight: var(--font-weight-normal);
   color: var(--muted-foreground);
@@ -120,7 +119,7 @@
 }
 
 .userInitial {
-  font-family: var(--font-primary);
+  font-family: var(--font-sans);
   font-size: 11px;
   font-weight: var(--font-weight-medium);
   color: var(--background);
@@ -133,14 +132,14 @@
 }
 
 .userName {
-  font-family: var(--font-primary);
+  font-family: var(--font-sans);
   font-size: var(--font-size-sm);
   font-weight: var(--font-weight-medium);
   color: var(--foreground);
 }
 
 .userRole {
-  font-family: var(--font-secondary);
+  font-family: var(--font-sans);
   font-size: 11px;
   font-weight: var(--font-weight-normal);
   color: var(--muted-foreground);
@@ -178,7 +177,7 @@
 }
 
 .llmConfigButton:hover {
-  border-color: var(--red-primary);
+  border-color: var(--primary);
 }
 
 .llmConfigButton .statusIcon {
@@ -194,7 +193,7 @@
 }
 
 .llmConfigButton .configText {
-  font-family: var(--font-secondary);
+  font-family: var(--font-sans);
   font-size: var(--font-size-xs);
   color: var(--muted-foreground);
 }
@@ -243,5 +242,5 @@
 
 .collapseToggle:hover {
   color: var(--foreground);
-  border-color: var(--red-primary);
+  border-color: var(--primary);
 }

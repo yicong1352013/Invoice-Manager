@@ -9,14 +9,14 @@
 }
 
 .label {
-  font-family: var(--font-secondary);
+  font-family: var(--font-sans);
   font-size: var(--font-size-xs);
   color: var(--muted-foreground);
   font-weight: var(--font-weight-normal);
 }
 
 .value {
-  font-family: var(--font-primary);
+  font-family: var(--font-sans);
   font-size: var(--spacing-2xl);
   font-weight: var(--font-weight-semibold);
   color: var(--foreground);

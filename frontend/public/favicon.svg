@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" role="img" aria-label="发票管理系统">
+  <defs>
+    <linearGradient id="im-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3B82F6"/>
+      <stop offset="1" stop-color="#1D4ED8"/>
+    </linearGradient>
+  </defs>
+  <!-- rounded badge -->
+  <rect x="2" y="2" width="44" height="44" rx="11" fill="url(#im-bg)"/>
+  <!-- receipt with zigzag bottom edge -->
+  <path d="M15 11h18v22.5l-3-2-3 2-3-2-3 2-3-2-3 2z" fill="#FFFFFF"/>
+  <!-- amount lines -->
+  <rect x="19" y="16.5" width="10" height="2.4" rx="1.2" fill="#2563EB"/>
+  <rect x="19" y="21.5" width="10" height="2.4" rx="1.2" fill="#93C5FD"/>
+  <!-- verification check -->
+  <path d="M19.4 27.9l2.3 2.3 5.1-5.2" fill="none" stroke="#2563EB" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

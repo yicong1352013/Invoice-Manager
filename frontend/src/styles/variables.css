@@ -1,16 +1,18 @@
-/* Design tokens extracted from invoice-manager.pen */
+/* Design tokens — keep in sync with src/theme.ts (antd ConfigProvider). */
 :root {
-  /* Colors - Primary Palette */
+  /* Colors - Neutrals (slate) */
   --background: #FFFFFF;
-  --surface: #FAFAFA;
-  --foreground: #0D0D0D;
-  --black-primary: #0D0D0D;
-  --muted-foreground: #7A7A7A;
-  --border: #E8E8E8;
-  --gray-400: #B0B0B0;
+  --surface: #F8FAFC;
+  --foreground: #1E293B;
+  --black-primary: #0F172A;
+  --muted-foreground: #64748B;
+  --border: #E2E8F0;
+  --gray-400: #94A3B8;
 
-  /* Colors - Brand */
-  --red-primary: #E42313;
+  /* Colors - Brand (Trust Blue) */
+  --primary: #2563EB;
+  --primary-hover: #1D4ED8;
+  --primary-tint: #EFF6FF;
 
   /* Colors - Semantic */
   --success: #22C55E;
@@ -22,9 +24,8 @@
   --info: #3B82F6;
   --info-dark: #2563EB;
 
-  /* Typography - Font Families */
-  --font-primary: 'Space Grotesk', -apple-system, BlinkMacSystemFont, sans-serif;
-  --font-secondary: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  /* Typography - single stack: Latin (Inter) + CJK fallbacks */
+  --font-sans: 'Inter', 'PingFang SC', 'Microsoft YaHei', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
 
   /* Typography - Font Sizes */
   --font-size-xs: 12px;
@@ -66,10 +67,10 @@
   --content-padding-y: 40px;
   --header-height: 64px;
 
-  /* Border Radius */
+  /* Border Radius (base mirrors antd borderRadius in theme.ts) */
   --radius-none: 0;
   --radius-sm: 2px;
-  --radius-base: 4px;
+  --radius-base: 6px;
   --radius-md: 6px;
   --radius-lg: 8px;
   --radius-xl: 12px;

@@ -17,7 +17,7 @@
 }
 
 .pageTitle {
-  font-family: var(--font-secondary);
+  font-family: var(--font-sans);
   font-size: var(--font-size-2xl);
   font-weight: var(--font-weight-semibold);
   color: var(--foreground);
@@ -26,14 +26,14 @@
 }
 
 .pageSubtitle {
-  font-family: var(--font-secondary);
+  font-family: var(--font-sans);
   font-size: var(--font-size-sm);
   color: var(--muted-foreground);
   margin: var(--spacing-xs) 0 0 0;
 }
 
 .sectionHint {
-  font-family: var(--font-secondary);
+  font-family: var(--font-sans);
   font-size: var(--font-size-sm);
   color: var(--muted-foreground);
   margin: 0 0 var(--spacing-base) 0;

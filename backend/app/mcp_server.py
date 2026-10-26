@@ -23,7 +23,8 @@ logger = logging.getLogger(__name__)
 
 mcp = FastMCP(name="Invoice Manager", instructions=(
     "发票管理系统只读接口。工具返回中国增值税发票的结构化数据："
-    "发票号码、开票日期、购/销双方名称与税号、金额、税额、价税合计、"
+    "发票号码、发票类型、开票日期、购/销双方名称与税号、地址电话、"
+    "开户行及账号、金额、税额、价税合计、备注、开票人、"
     "状态（已上传/解析中/待审核/已确认/已报销/未报销），以及 OCR/LLM "
     "识别结果与差异、附件元数据。"
 ))
@@ -33,6 +34,7 @@ def _invoice_summary(inv: Invoice) -> dict:
     return {
         "id": inv.id,
         "invoice_number": inv.invoice_number,
+        "invoice_type": inv.invoice_type,
         "issue_date": str(inv.issue_date) if inv.issue_date else None,
         "buyer_name": inv.buyer_name,
         "buyer_tax_id": inv.buyer_tax_id,
@@ -43,6 +45,7 @@ def _invoice_summary(inv: Invoice) -> dict:
         "tax_amount": str(inv.tax_amount) if inv.tax_amount is not None else None,
         "total_with_tax": str(inv.total_with_tax) if inv.total_with_tax is not None else None,
         "tax_rate": inv.tax_rate,
+        "remark": inv.remark,
         "status": inv.status.value if inv.status else None,
         "owner": inv.owner,
         "file_name": inv.file_name,
@@ -112,6 +115,7 @@ async def get_invoice_detail(invoice_id: int) -> dict:
             return {"error": f"发票 {invoice_id} 不存在"}
 
         from app.models.invoice import LlmResult, OcrResult, ParsingDiff
+        from app.services.invoice_service import COMPARABLE_FIELDS
 
         ocr_row = (await db.execute(select(OcrResult).where(OcrResult.invoice_id == invoice_id))).scalar_one_or_none()
         llm_row = (await db.execute(select(LlmResult).where(LlmResult.invoice_id == invoice_id))).scalar_one_or_none()
@@ -122,12 +126,7 @@ async def get_invoice_detail(invoice_id: int) -> dict:
         def _fields(row, exclude_text=True):
             if row is None:
                 return None
-            data = {c: getattr(row, c) for c in (
-                "invoice_number", "issue_date", "buyer_name", "buyer_tax_id",
-                "seller_name", "seller_tax_id", "item_name", "total_with_tax",
-                "amount", "tax_amount", "tax_rate",
-            )}
-            return data
+            return {c: getattr(row, c) for c in COMPARABLE_FIELDS}
 
         detail = _invoice_summary(invoice)
         detail["ocr_result"] = _fields(ocr_row)

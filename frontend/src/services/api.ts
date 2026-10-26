@@ -99,11 +99,13 @@ export const healthCheck = async () => {
 };
 
 // Upload invoices
-export const uploadInvoices = async (files: File[]): Promise<UploadResponse[]> => {
+export const uploadInvoices = async (files: File[], workflowRunId?: number, clientFileIds?: string[]): Promise<UploadResponse[]> => {
   const formData = new FormData();
   files.forEach((file) => {
     formData.append('files', file);
   });
+  if (workflowRunId) formData.append('workflow_run_id', String(workflowRunId));
+  if (clientFileIds) formData.append('client_file_ids', JSON.stringify(clientFileIds));
 
   const response = await api.post('/invoices/upload', formData, {
     headers: {
@@ -131,6 +133,16 @@ export const listInvoices = async (params: ListParams = {}): Promise<InvoiceList
 // Get invoice detail
 export const getInvoice = async (id: number): Promise<InvoiceDetail> => {
   const response = await api.get(`/invoices/${id}`);
+  return response.data;
+};
+
+export interface InvoiceNavigation {
+  previous_id: number | null;
+  next_id: number | null;
+}
+
+export const getInvoiceNavigation = async (id: number, params: ListParams = {}): Promise<InvoiceNavigation> => {
+  const response = await api.get(`/invoices/${id}/navigation`, { params });
   return response.data;
 };
 
@@ -250,11 +262,15 @@ export const uploadAttachments = async (
   invoiceId: number,
   files: File[],
   category: AttachmentCategory = 'other',
-  note?: string
+  note?: string,
+  workflowRunId?: number,
+  clientFileIds?: string[]
 ): Promise<AttachmentUploadResult[]> => {
   const formData = new FormData();
   files.forEach((file) => formData.append('files', file));
   formData.append('category', category);
+  if (workflowRunId) formData.append('workflow_run_id', String(workflowRunId));
+  if (clientFileIds) formData.append('client_file_ids', JSON.stringify(clientFileIds));
   if (note) {
     formData.append('note', note);
   }

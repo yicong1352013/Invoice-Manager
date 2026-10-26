@@ -4,11 +4,14 @@ Business invariants:
 - Totals must sum every monetary column treating missing values as zero.
 - Merged print PDF must contain exactly one page per input original.
 - Word/PDF builders must include the totals row and not crash on empty data.
+- Exports carry the 数电票 header fields (发票类型/备注) alongside the originals.
 """
 
 from decimal import Decimal
 from io import BytesIO
 from types import SimpleNamespace
+
+import pytest
 
 from app.services.export_service import (
     build_pdf_export,
@@ -21,10 +24,12 @@ from app.services.export_service import (
 def _inv(amount=None, tax=None, total=None):
     return SimpleNamespace(
         invoice_number='12345678', issue_date='2025-11-05',
+        invoice_type='电子发票（普通发票）',
         buyer_name='买方', buyer_tax_id='123456789012345',
         seller_name='卖方', seller_tax_id='223456789012345',
         item_name='服务费', amount=amount, tax_amount=tax, total_with_tax=total,
-        tax_rate='6%', status=SimpleNamespace(value='已确认'), owner='admin',
+        tax_rate='6%', remark=None,
+        status=SimpleNamespace(value='已确认'), owner='admin',
         file_name='a.png', created_at=None,
     )
 
@@ -58,11 +63,57 @@ def test_word_export_contains_totals_row():
     assert '106.00' in document_xml
 
 
+def test_export_headers_include_type_and_remark():
+    """发票类型/备注 must be export columns next to the originals."""
+    invoices = [_inv(amount=Decimal('100.00'), tax=Decimal('6.00'), total=Decimal('106.00'))]
+    output = build_word_export(invoices, compute_totals(invoices))
+    import zipfile
+    with zipfile.ZipFile(BytesIO(output.getvalue())) as archive:
+        document_xml = archive.read('word/document.xml').decode('utf-8')
+    assert '发票类型' in document_xml
+    assert '备注' in document_xml
+    assert '电子发票（普通发票）' in document_xml
+
+
 def test_pdf_export_renders_with_cjk_font():
     invoices = [_inv(amount=Decimal('100.00'), tax=Decimal('6.00'), total=Decimal('106.00'))]
     output = build_pdf_export(invoices, compute_totals(invoices))
     content = output.getvalue()
     assert content[:5] == b'%PDF-'
+
+
+def test_pdf_treats_invoice_text_as_data_not_image_or_markup():
+    invoice = _inv()
+    invoice.item_name = '<img src="file:///must-never-be-read.png" /> & <b>literal</b>'
+    output = build_pdf_export([invoice], compute_totals([invoice]))
+    from pypdf import PdfReader
+    extracted = "".join("".join(page.extract_text().split()) for page in PdfReader(output).pages)
+    assert '<imgsrc=' in extracted and '<b>literal</b>' in extracted
+
+
+def test_pdf_export_wraps_long_cjk_remark():
+    """The 600-character note that broke auto widths must render through its end."""
+    invoice = _inv()
+    invoice.remark = '备注信息测试' * 100 + 'REMARK_END'
+    from pypdf import PdfReader
+    reader = PdfReader(build_pdf_export([invoice], compute_totals([invoice])))
+    extracted = "".join("".join(page.extract_text().split()) for page in reader.pages)
+    assert len(reader.pages) > 1
+    assert 'REMARK_END' in extracted
+
+
+@pytest.mark.parametrize('preceding_count', [0, 11])
+def test_pdf_export_splits_long_remark_without_losing_text(preceding_count):
+    """A note taller than a page must survive even when its row starts near a page end."""
+    invoice = _inv()
+    invoice.remark = 'ZXQJ' * 200 + 'REMARK_END'
+    invoices = [_inv() for _ in range(preceding_count)] + [invoice]
+    from pypdf import PdfReader
+    reader = PdfReader(build_pdf_export(invoices, compute_totals(invoices)))
+    extracted = "".join("".join(page.extract_text().split()) for page in reader.pages)
+    assert len(reader.pages) > 1
+    assert ''.join(character for character in extracted if character in 'ZXQJ') == 'ZXQJ' * 200
+    assert 'REMARK_END' in extracted
 
 
 def _one_page_pdf_bytes() -> bytes:

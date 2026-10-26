@@ -14,9 +14,9 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 EXPORT_HEADERS = [
-    '发票号码', '开票日期', '购买方名称', '购买方纳税人识别号',
+    '发票号码', '开票日期', '发票类型', '购买方名称', '购买方纳税人识别号',
     '销售方名称', '销售方纳税人识别号', '项目名称',
-    '金额', '税额', '价税合计', '税率',
+    '金额', '税额', '价税合计', '税率', '备注',
     '状态', '归属人', '文件名', '创建时间',
 ]
 
@@ -86,6 +86,7 @@ def build_word_export(invoices: List[Any], totals: Dict[str, Decimal]) -> BytesI
         fill_row(table.add_row().cells, [
             inv.invoice_number or '',
             str(inv.issue_date) if inv.issue_date else '',
+            inv.invoice_type or '',
             inv.buyer_name or '',
             inv.buyer_tax_id or '',
             inv.seller_name or '',
@@ -95,6 +96,7 @@ def build_word_export(invoices: List[Any], totals: Dict[str, Decimal]) -> BytesI
             inv.tax_amount if inv.tax_amount is not None else '',
             inv.total_with_tax if inv.total_with_tax is not None else '',
             inv.tax_rate or '',
+            inv.remark or '',
             inv.status.value if inv.status else '',
             inv.owner or '',
             inv.file_name or '',
@@ -102,7 +104,7 @@ def build_word_export(invoices: List[Any], totals: Dict[str, Decimal]) -> BytesI
         ])
 
     # Totals row: label in the 项目名称 column, sums under the money columns
-    totals_row = ['合计', '', '', '', '', '', '', totals['amount'], totals['tax_amount'], totals['total_with_tax'], '', '', '', '', '']
+    totals_row = ['合计', '', '', '', '', '', '', '', totals['amount'], totals['tax_amount'], totals['total_with_tax'], '', '', '', '', '', '']
     fill_row(table.add_row().cells, totals_row, bold=True)
 
     output = BytesIO()
@@ -113,6 +115,7 @@ def build_word_export(invoices: List[Any], totals: Dict[str, Decimal]) -> BytesI
 
 def build_pdf_export(invoices: List[Any], totals: Dict[str, Decimal]) -> BytesIO:
     """Build a PDF: title + landscape detail table + totals row."""
+    from xml.sax.saxutils import escape
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4, landscape
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -148,6 +151,7 @@ def build_pdf_export(invoices: List[Any], totals: Dict[str, Decimal]) -> BytesIO
     title_style = ParagraphStyle('CNTitle', parent=styles['Title'], fontName=font_name, fontSize=16)
     cell_style = ParagraphStyle(
         'CNCell', parent=styles['BodyText'], fontName=font_name, fontSize=7.5, leading=9.5,
+        wordWrap='CJK',
     )
 
     story = [Paragraph('发票明细', title_style)]
@@ -155,24 +159,30 @@ def build_pdf_export(invoices: List[Any], totals: Dict[str, Decimal]) -> BytesIO
     data = [[Paragraph(h, cell_style) for h in EXPORT_HEADERS]]
     for inv in invoices:
         data.append([
-            Paragraph(str(x if x is not None and x != '' else '-'), cell_style)
+            Paragraph(escape(str(x if x is not None and x != '' else '-')), cell_style)
             for x in [
-                inv.invoice_number, inv.issue_date, inv.buyer_name, inv.buyer_tax_id,
+                inv.invoice_number, inv.issue_date, inv.invoice_type,
+                inv.buyer_name, inv.buyer_tax_id,
                 inv.seller_name, inv.seller_tax_id, inv.item_name, inv.amount,
-                inv.tax_amount, inv.total_with_tax, inv.tax_rate,
+                inv.tax_amount, inv.total_with_tax, inv.tax_rate, inv.remark,
                 inv.status.value if inv.status else '', inv.owner, inv.file_name,
                 inv.created_at.strftime('%Y-%m-%d %H:%M') if inv.created_at else '',
             ]
         ])
-    data.append([
-        Paragraph('<b>合计</b>', cell_style), '', '', '', '', '', '',
-        Paragraph(f"<b>{totals['amount']}</b>", cell_style),
-        Paragraph(f"<b>{totals['tax_amount']}</b>", cell_style),
-        Paragraph(f"<b>{totals['total_with_tax']}</b>", cell_style),
-        '', '', '', '', '',
-    ])
+    data.append(
+        [Paragraph('<b>合计</b>', cell_style), '', '', '', '', '', '', ''] +
+        [
+            Paragraph(f"<b>{totals['amount']}</b>", cell_style),
+            Paragraph(f"<b>{totals['tax_amount']}</b>", cell_style),
+            Paragraph(f"<b>{totals['total_with_tax']}</b>", cell_style),
+        ] +
+        ['', '', '', '', '', '']
+    )
 
-    table = Table(data, repeatRows=1)
+    table = Table(
+        data, colWidths=[doc.width / len(EXPORT_HEADERS)] * len(EXPORT_HEADERS),
+        repeatRows=1, splitInRow=1,
+    )
     table.setStyle(TableStyle([
         ('GRID', (0, 0), (-1, -1), 0.4, colors.grey),
         ('BACKGROUND', (0, 0), (-1, 0), colors.Color(0.92, 0.92, 0.92)),

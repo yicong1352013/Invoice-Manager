@@ -46,6 +46,10 @@ slowapi==0.1.9
 pyjwt==2.8.0
 bcrypt==4.1.2
 
+# Durable workflow notification transports and credential encryption
+websockets>=14,<18
+cryptography>=43,<51
+
 # Testing
 pytest==7.4.4
 pytest-asyncio==0.23.3

@@ -14,11 +14,17 @@ export interface Invoice {
   file_name: string;
   file_type: string;
   invoice_number: string | null;
+  invoice_type: string | null;
+  invoice_code: string | null;
   issue_date: string | null;
   buyer_name: string | null;
   buyer_tax_id: string | null;
+  buyer_address_phone: string | null;
+  buyer_bank_account: string | null;
   seller_name: string | null;
   seller_tax_id: string | null;
+  seller_address_phone: string | null;
+  seller_bank_account: string | null;
   item_name: string | null;
   total_with_tax: number | null;
   specification: string | null;
@@ -28,6 +34,9 @@ export interface Invoice {
   amount: number | null;
   tax_rate: string | null;
   tax_amount: number | null;
+  total_with_tax_cn: string | null;
+  remark: string | null;
+  drawer: string | null;
   status: InvoiceStatus;
   owner: string | null;
   created_at: string;
@@ -39,11 +48,17 @@ export interface OcrResult {
   invoice_id: number;
   raw_text: string | null;
   invoice_number: string | null;
+  invoice_type: string | null;
+  invoice_code: string | null;
   issue_date: string | null;
   buyer_name: string | null;
   buyer_tax_id: string | null;
+  buyer_address_phone: string | null;
+  buyer_bank_account: string | null;
   seller_name: string | null;
   seller_tax_id: string | null;
+  seller_address_phone: string | null;
+  seller_bank_account: string | null;
   item_name: string | null;
   total_with_tax: string | null;
   specification: string | null;
@@ -53,6 +68,9 @@ export interface OcrResult {
   amount: string | null;
   tax_rate: string | null;
   tax_amount: string | null;
+  total_with_tax_cn: string | null;
+  remark: string | null;
+  drawer: string | null;
   created_at: string;
 }
 
@@ -60,11 +78,17 @@ export interface LlmResult {
   id: number;
   invoice_id: number;
   invoice_number: string | null;
+  invoice_type: string | null;
+  invoice_code: string | null;
   issue_date: string | null;
   buyer_name: string | null;
   buyer_tax_id: string | null;
+  buyer_address_phone: string | null;
+  buyer_bank_account: string | null;
   seller_name: string | null;
   seller_tax_id: string | null;
+  seller_address_phone: string | null;
+  seller_bank_account: string | null;
   item_name: string | null;
   total_with_tax: string | null;
   specification: string | null;
@@ -74,6 +98,9 @@ export interface LlmResult {
   amount: string | null;
   tax_rate: string | null;
   tax_amount: string | null;
+  total_with_tax_cn: string | null;
+  remark: string | null;
+  drawer: string | null;
   created_at: string;
 }
 
@@ -91,8 +118,23 @@ export interface ParsingDiff {
 export interface AiVerificationField {
   field: string;
   status: 'correct' | 'incorrect' | 'unsure';
+  severity?: 'none' | 'warning' | 'blocking';
   corrected_value: string | null;
   reason: string | null;
+}
+
+export function getAiFieldSeverity(field: AiVerificationField): 'none' | 'warning' | 'blocking' {
+  return field.severity ?? (field.status === 'correct' ? 'none' : 'blocking');
+}
+
+export function summarizeAiVerification(result: { overall?: string; fields?: AiVerificationField[] | null }) {
+  const fields = result.fields ?? [];
+  const warningCount = fields.filter(field => getAiFieldSeverity(field) === 'warning').length;
+  const blockingCount = fields.filter(field => getAiFieldSeverity(field) === 'blocking').length;
+  const label = result.overall === 'pass'
+    ? warningCount ? `审核通过，含 ${warningCount} 项提示` : '审核通过'
+    : blockingCount ? `需处理 ${blockingCount} 个关键问题` : '审核未通过，请查看审核说明';
+  return { warningCount, blockingCount, label };
 }
 
 export interface AiVerification {

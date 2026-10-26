@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Card,
@@ -15,6 +15,7 @@ import {
   Row,
   Col,
   Dropdown,
+  Alert,
 } from 'antd';
 import {
   EyeOutlined,
@@ -29,6 +30,8 @@ import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { formatBackendTime } from '../utils/time';
 import { getToken, listInvoices, deleteInvoice, batchUpdateInvoices, batchDeleteInvoices, batchReprocessInvoices, getStatistics } from '../services/api';
+import api from '../services/api';
+import { createWorkflowRun, downloadWorkflowFile, listWorkflows, workflowError, type WorkflowDefinition } from '../services/workflowApi';
 import type { Invoice, Statistics } from '../types/invoice';
 import { InvoiceStatus } from '../types/invoice';
 import ResizableTitle from '../components/ResizableTitle';
@@ -61,7 +64,18 @@ function InvoiceListPage() {
   const [pageSize, setPageSize] = useState(20);
   const [selectedRowKeys, setSelectedRowKeys] = useState<number[]>([]);
   const [statistics, setStatistics] = useState<Statistics | null>(null);
-  const [uploadOpen, setUploadOpen] = useState(false);
+  const [uploadOpen, setUploadOpen] = useState(() => new URLSearchParams(window.location.search).has('upload'));
+  const [excelTemplates, setExcelTemplates] = useState<{ id: number; name: string; enabled: boolean; version: number }[]>([]);
+  const [excelTemplateId, setExcelTemplateId] = useState<number>();
+  const [excelExportOpen, setExcelExportOpen] = useState(false);
+  const [workflowOpen, setWorkflowOpen] = useState(false);
+  const [workflowLoading, setWorkflowLoading] = useState(false);
+  const [workflowBusy, setWorkflowBusy] = useState(false);
+  const [workflows, setWorkflows] = useState<WorkflowDefinition[]>([]);
+  const [selectedWorkflowId, setSelectedWorkflowId] = useState<number>();
+  const [workflowName, setWorkflowName] = useState('');
+  const [workflowInvoiceIds, setWorkflowInvoiceIds] = useState<number[]>([]);
+  const workflowSubmitting = useRef(false);
 
   // Filters
   const [statusFilter, setStatusFilter] = useState<string | undefined>();
@@ -216,7 +230,46 @@ function InvoiceListPage() {
     });
   };
 
-  const handleExport = (format: 'csv' | 'excel' | 'word' | 'pdf') => {
+  const openWorkflow = async () => {
+    if (!selectedRowKeys.length) return;
+    setWorkflowInvoiceIds([...selectedRowKeys]);
+    setSelectedWorkflowId(undefined);
+    setWorkflowName('');
+    setWorkflows([]);
+    setWorkflowOpen(true);
+    setWorkflowLoading(true);
+    try {
+      const enabled = (await listWorkflows()).filter(workflow => workflow.enabled);
+      setWorkflows(enabled);
+      if (enabled.length === 1) setSelectedWorkflowId(enabled[0].id);
+    } catch (error) {
+      message.error(workflowError(error));
+    } finally {
+      setWorkflowLoading(false);
+    }
+  };
+
+  const executeWorkflow = async () => {
+    if (!selectedWorkflowId || !workflowInvoiceIds.length || workflowSubmitting.current) return;
+    workflowSubmitting.current = true;
+    setWorkflowBusy(true);
+    try {
+      const run = await createWorkflowRun({
+        workflow_id: selectedWorkflowId,
+        name: workflowName.trim() || `发票批次 ${dayjs().format('YYYY-MM-DD HH:mm')}`,
+        invoice_ids: workflowInvoiceIds,
+      });
+      setWorkflowOpen(false);
+      navigate(`/workflows/runs/${run.id}`);
+    } catch (error) {
+      message.error(workflowError(error));
+    } finally {
+      workflowSubmitting.current = false;
+      setWorkflowBusy(false);
+    }
+  };
+
+  const handleExport = async (format: 'csv' | 'excel' | 'word' | 'pdf', templateId?: number) => {
     const params = new URLSearchParams();
 
     if (selectedRowKeys.length > 0) {
@@ -235,6 +288,12 @@ function InvoiceListPage() {
       params.append('end_date', dateRange[1].format('YYYY-MM-DD'));
     }
 
+    if (format === 'excel') {
+      if (templateId) params.append('template_id', String(templateId));
+      try { await downloadWorkflowFile(`/invoices/export/excel?${params.toString()}`, '发票导出.xlsx'); setExcelExportOpen(false); }
+      catch (error) { message.error(workflowError(error)); }
+      return;
+    }
     const token = getToken();
     if (token) {
       params.append('token', token);
@@ -270,6 +329,18 @@ function InvoiceListPage() {
         onHeaderCell: () => ({
           width: columnWidths.invoice_number,
           onResize: handleColumnResize('invoice_number'),
+        }),
+      },
+      invoice_type: {
+        title: '发票类型',
+        dataIndex: 'invoice_type',
+        key: 'invoice_type',
+        width: columnWidths.invoice_type,
+        ellipsis: true,
+        render: (val) => val || '-',
+        onHeaderCell: () => ({
+          width: columnWidths.invoice_type,
+          onResize: handleColumnResize('invoice_type'),
         }),
       },
       issue_date: {
@@ -437,6 +508,18 @@ function InvoiceListPage() {
           onResize: handleColumnResize('total_with_tax'),
         }),
       },
+      remark: {
+        title: '备注',
+        dataIndex: 'remark',
+        key: 'remark',
+        width: columnWidths.remark,
+        ellipsis: true,
+        render: (val) => val || '-',
+        onHeaderCell: () => ({
+          width: columnWidths.remark,
+          onResize: handleColumnResize('remark'),
+        }),
+      },
       status: {
         title: '状态',
         dataIndex: 'status',
@@ -505,7 +588,14 @@ function InvoiceListPage() {
             <Button
               type="link"
               icon={<EyeOutlined />}
-              onClick={() => navigate(`/invoices/${record.id}`)}
+              onClick={() => navigate(`/invoices/${record.id}`, {
+                state: { invoiceFilters: {
+                  status: statusFilter,
+                  owner: ownerFilter || undefined,
+                  start_date: dateRange?.[0]?.format('YYYY-MM-DD'),
+                  end_date: dateRange?.[1]?.format('YYYY-MM-DD'),
+                } },
+              })}
             >
               详情
             </Button>
@@ -521,7 +611,7 @@ function InvoiceListPage() {
         ),
       },
     }),
-    [columnWidths, handleColumnResize, navigate]
+    [columnWidths, handleColumnResize, navigate, statusFilter, ownerFilter, dateRange]
   );
 
   // Build columns based on visible column configs
@@ -577,7 +667,6 @@ function InvoiceListPage() {
             type="primary"
             icon={<UploadOutlined />}
             onClick={() => setUploadOpen(true)}
-            className={styles.primaryButton}
           >
             上传发票
           </Button>
@@ -668,6 +757,9 @@ function InvoiceListPage() {
         <Button icon={<ReloadOutlined />} onClick={fetchInvoices}>
           刷新
         </Button>
+        <Button disabled={selectedRowKeys.length === 0} onClick={openWorkflow}>
+          执行工作流{selectedRowKeys.length ? ` (${selectedRowKeys.length})` : ''}
+        </Button>
 
         <Dropdown
           menu={{
@@ -677,7 +769,12 @@ function InvoiceListPage() {
               { key: 'word', label: '导出 Word' },
               { key: 'pdf', label: '导出 PDF' },
             ],
-            onClick: ({ key }) => handleExport(key as 'csv' | 'excel' | 'word' | 'pdf'),
+            onClick: async ({ key }) => {
+              if (key === 'excel') {
+                try { setExcelTemplates((await api.get('/export-templates')).data); setExcelTemplateId(undefined); setExcelExportOpen(true); }
+                catch (error) { message.error(workflowError(error)); }
+              } else void handleExport(key as 'csv' | 'word' | 'pdf');
+            },
           }}
         >
           <Button icon={<DownloadOutlined />}>
@@ -782,6 +879,39 @@ function InvoiceListPage() {
       </div>
 
       {/* Upload modal (Kingdee-style, replaces the standalone upload page) */}
+      <Modal
+        title="对选中发票执行工作流"
+        open={workflowOpen}
+        onCancel={() => { if (!workflowBusy) setWorkflowOpen(false); }}
+        onOk={executeWorkflow}
+        okText="确认执行并发送"
+        confirmLoading={workflowBusy}
+        okButtonProps={{ disabled: workflowLoading || !selectedWorkflowId || !workflowInvoiceIds.length }}
+        cancelButtonProps={{ disabled: workflowBusy }}
+        closable={!workflowBusy}
+        maskClosable={!workflowBusy}
+      >
+        <p>已选择 {workflowInvoiceIds.length} 张发票。</p>
+        <Alert type="info" showIcon style={{ marginBottom: 16 }} message="发票识别结束后可执行。将进行 AI 审核及必要的 OCR 识别；整批通过后，按所选工作流配置导出结果，并向配置的收件目标实际发送。" />
+        <label htmlFor="selected-invoices-workflow">工作流</label>
+        <Select
+          id="selected-invoices-workflow"
+          style={{ width: '100%', margin: '8px 0 16px' }}
+          loading={workflowLoading}
+          disabled={workflowBusy || workflowLoading}
+          value={selectedWorkflowId}
+          onChange={setSelectedWorkflowId}
+          placeholder={workflowLoading ? '正在加载工作流' : '选择已启用的工作流'}
+          notFoundContent="暂无已启用的工作流，请联系管理员配置"
+          options={workflows.map(workflow => ({ value: workflow.id, label: workflow.name }))}
+        />
+        <label htmlFor="selected-invoices-run-name">批次名称（可选）</label>
+        <Input id="selected-invoices-run-name" style={{ marginTop: 8 }} maxLength={150} disabled={workflowBusy} value={workflowName} onChange={event => setWorkflowName(event.target.value)} placeholder="留空自动生成批次名称" />
+      </Modal>
+      <Modal title="导出 Excel" open={excelExportOpen} onCancel={() => setExcelExportOpen(false)} onOk={() => handleExport('excel', excelTemplateId)} okText="下载 Excel">
+        <label htmlFor="excel-export-template">导出模板</label>
+        <Select id="excel-export-template" style={{ width: '100%', marginTop: 8 }} allowClear placeholder="默认发票明细表" value={excelTemplateId} onChange={setExcelTemplateId} options={excelTemplates.filter(t => t.enabled && t.version > 0).map(t => ({ value: t.id, label: `${t.name} · v${t.version}` }))} />
+      </Modal>
       <UploadModal
         open={uploadOpen}
         onClose={() => setUploadOpen(false)}

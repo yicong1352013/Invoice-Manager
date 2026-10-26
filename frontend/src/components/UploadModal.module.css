@@ -24,10 +24,10 @@
   align-items: center;
   gap: 8px;
   padding: 6px 12px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--border);
   border-radius: 6px;
   margin-bottom: 6px;
-  background: #fafafa;
+  background: var(--surface);
 }
 
 .fileName {
@@ -54,7 +54,7 @@
 .previewBox {
   display: flex;
   justify-content: center;
-  background: #fafafa;
+  background: var(--surface);
 }
 
 .previewFrame {
@@ -62,7 +62,7 @@
   height: 560px;
   border: none;
   object-fit: contain;
-  background: #fff;
+  background: var(--background);
 }
 
 .previewUnsupported {
@@ -103,7 +103,7 @@
   height: 52px;
   object-fit: cover;
   border-radius: 4px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--border);
 }
 
 .thumbLink {
@@ -116,7 +116,7 @@
 }
 
 .thumbLink:hover {
-  border-color: var(--red-primary, #e42313);
+  border-color: var(--primary);
   border-radius: 4px;
 }
 

@@ -1,5 +1,5 @@
-/* Google Fonts Import */
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap');
+/* Google Fonts Import (Inter only; falls back to system CJK stacks offline) */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
 /* Global Reset & Base Styles */
 *,
@@ -17,7 +17,7 @@ html {
 }
 
 body {
-  font-family: var(--font-secondary);
+  font-family: var(--font-sans);
   font-size: var(--font-size-base);
   font-weight: var(--font-weight-normal);
   line-height: var(--line-height-normal);
@@ -31,7 +31,7 @@ body {
 
 /* Typography - Headings */
 h1, h2, h3, h4, h5, h6 {
-  font-family: var(--font-primary);
+  font-family: var(--font-sans);
   font-weight: var(--font-weight-semibold);
   line-height: var(--line-height-tight);
   color: var(--black-primary);
@@ -68,7 +68,7 @@ p {
 
 /* Links */
 a {
-  color: var(--red-primary);
+  color: var(--primary);
   text-decoration: none;
   transition: color var(--transition-fast);
 }
@@ -79,7 +79,7 @@ a:hover {
 
 /* Focus States */
 :focus-visible {
-  outline: 2px solid var(--red-primary);
+  outline: 2px solid var(--primary);
   outline-offset: 2px;
 }
 
@@ -104,7 +104,7 @@ a:hover {
 
 /* Selection */
 ::selection {
-  background: var(--red-primary);
+  background: var(--primary);
   color: var(--background);
 }
 
@@ -127,15 +127,6 @@ a:hover {
 
 .text-info {
   color: var(--info);
-}
-
-/* Font Family Utilities */
-.font-primary {
-  font-family: var(--font-primary);
-}
-
-.font-secondary {
-  font-family: var(--font-secondary);
 }
 
 /* Resizable table column styles (preserved from original) */

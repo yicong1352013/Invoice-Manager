@@ -27,12 +27,17 @@ async def update_attachment(
         raise HTTPException(status_code=404, detail="附件不存在")
 
     # Current invoice access
-    current_invoice = await db.get(Invoice, attachment.invoice_id)
+    invoice_ids = sorted({attachment.invoice_id, body.invoice_id or attachment.invoice_id})
+    locked = (await db.execute(select(Invoice).where(Invoice.id.in_(invoice_ids))
+                              .order_by(Invoice.id).with_for_update()
+                              .execution_options(populate_existing=True))).scalars().all()
+    accessible = {invoice.id: invoice for invoice in locked}
+    current_invoice = accessible.get(attachment.invoice_id)
     if not current_invoice or not can_access_invoice(current_user, current_invoice.owner):
         raise HTTPException(status_code=404, detail="附件不存在")
 
     if body.invoice_id is not None and body.invoice_id != attachment.invoice_id:
-        target = await db.get(Invoice, body.invoice_id)
+        target = accessible.get(body.invoice_id)
         if not target or not can_access_invoice(current_user, target.owner):
             raise HTTPException(status_code=404, detail="目标发票不存在")
         attachment.invoice_id = body.invoice_id

@@ -55,6 +55,17 @@ class Invoice(Base):
     tax_rate = Column(String(20), nullable=True)  # 税率
     tax_amount = Column(Numeric(12, 2), nullable=True)  # 税额
 
+    # Header fields per 数电票票面 (all optional; legacy invoices lack some)
+    invoice_type = Column(String(100), nullable=True)  # 发票名称/类型（票头原文）
+    invoice_code = Column(String(50), nullable=True)  # 发票代码（老式发票，数电票无）
+    buyer_address_phone = Column(String(255), nullable=True)  # 购买方地址、电话
+    buyer_bank_account = Column(String(255), nullable=True)  # 购买方开户行及账号
+    seller_address_phone = Column(String(255), nullable=True)  # 销售方地址、电话
+    seller_bank_account = Column(String(255), nullable=True)  # 销售方开户行及账号
+    total_with_tax_cn = Column(String(200), nullable=True)  # 价税合计（大写）
+    remark = Column(Text, nullable=True)  # 备注
+    drawer = Column(String(50), nullable=True)  # 开票人
+
     # Status management
     status = Column(SQLEnum(InvoiceStatus), default=InvoiceStatus.PENDING, nullable=False)
     owner = Column(String(100), nullable=True)  # 归属人
@@ -98,6 +109,16 @@ class OcrResult(Base):
     amount = Column(String(50), nullable=True)
     tax_rate = Column(String(20), nullable=True)
     tax_amount = Column(String(50), nullable=True)
+    # Header fields per 数电票票面 (mirrors Invoice columns, as strings)
+    invoice_type = Column(String(100), nullable=True)
+    invoice_code = Column(String(50), nullable=True)
+    buyer_address_phone = Column(String(255), nullable=True)
+    buyer_bank_account = Column(String(255), nullable=True)
+    seller_address_phone = Column(String(255), nullable=True)
+    seller_bank_account = Column(String(255), nullable=True)
+    total_with_tax_cn = Column(String(200), nullable=True)
+    remark = Column(Text, nullable=True)
+    drawer = Column(String(50), nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -126,6 +147,16 @@ class LlmResult(Base):
     amount = Column(String(50), nullable=True)
     tax_rate = Column(String(20), nullable=True)
     tax_amount = Column(String(50), nullable=True)
+    # Header fields per 数电票票面 (mirrors Invoice columns, as strings)
+    invoice_type = Column(String(100), nullable=True)
+    invoice_code = Column(String(50), nullable=True)
+    buyer_address_phone = Column(String(255), nullable=True)
+    buyer_bank_account = Column(String(255), nullable=True)
+    seller_address_phone = Column(String(255), nullable=True)
+    seller_bank_account = Column(String(255), nullable=True)
+    total_with_tax_cn = Column(String(200), nullable=True)
+    remark = Column(Text, nullable=True)
+    drawer = Column(String(50), nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -163,8 +194,8 @@ class AiVerification(Base):
     invoice_id = Column(Integer, ForeignKey("invoices.id"), nullable=False, unique=True)
 
     overall = Column(String(20), nullable=False)  # 'pass' | 'issues'
-    summary = Column(Text, nullable=True)         # AI one-line conclusion
-    fields = Column(JSON, nullable=True)          # [{field, status, corrected_value, reason}]
+    summary = Column(Text, nullable=True)         # locally computed review conclusion
+    fields = Column(JSON, nullable=True)          # [{field, status, severity, corrected_value, reason}]
     mode = Column(String(10), nullable=False)     # 'vision' | 'text'
     provider_name = Column(String(100), nullable=True)
     model = Column(String(200), nullable=True)
