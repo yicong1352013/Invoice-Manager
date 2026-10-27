@@ -75,7 +75,8 @@ test('an upload freezes its manifest until it settles, then allows attachment as
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText;
   const context = {
     exports: {}, require: name => { assert.ok(name in modules, `unexpected module: ${name}`); return modules[name]; },
-    crypto: require('node:crypto'), console,
+    // LAN deployments use HTTP, where randomUUID is unavailable.
+    crypto: { getRandomValues: array => require('node:crypto').webcrypto.getRandomValues(array) }, console,
     document: { addEventListener: (name, callback) => listeners.set(name, callback), removeEventListener: name => listeners.delete(name) },
     setInterval: () => 1, clearInterval() {},
   };
@@ -148,6 +149,12 @@ test('an upload freezes its manifest until it settles, then allows attachment as
   assert.deepEqual(Array.from(calls.invoices[0][0], item => item.name), ['A.pdf']);
   assert.equal(calls.create[0].upload_manifest.invoices[0].name, 'A.pdf');
   assert.equal(calls.create[0].upload_manifest.attachments[0].name, 'receipt.pdf');
+  const invoiceKey = calls.create[0].upload_manifest.invoices[0].id;
+  const attachmentKey = calls.create[0].upload_manifest.attachments[0].id;
+  assert.ok(invoiceKey && invoiceKey.length <= 100);
+  assert.ok(attachmentKey && attachmentKey.length <= 100);
+  assert.notEqual(invoiceKey, attachmentKey, 'invoice and attachment identities must be distinct');
+  assert.deepEqual(Array.from(calls.invoices[0][2]), [invoiceKey], 'the upload retains its manifest identity');
   assert.equal(elements(tree).some(node => node.props['aria-label'] === '移除B.pdf'), false);
   assert.equal(find(node => node.props.id === 'upload-workflow').value, 7);
   assert.equal(named('工作流批次名称').value, '');
@@ -171,6 +178,7 @@ test('an upload freezes its manifest until it settles, then allows attachment as
   assert.equal(calls.attachments[0][2], 'contract');
   assert.equal(calls.attachments[0][3], 'retry note');
   assert.equal(calls.attachments[0][4], 17);
+  assert.deepEqual(Array.from(calls.attachments[0][5]), [attachmentKey], 'retry retains the attachment manifest identity');
   assert.equal(button('提交批次').disabled, false, 'all manifest entries were uploaded');
   const submit = button('提交批次');
   await Promise.all([submit.onClick(), submit.onClick()]);

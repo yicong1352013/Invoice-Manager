@@ -123,12 +123,14 @@ export default function UploadModal({ open, onClose, onCompleted }: UploadModalP
         message.error(`文件大小不能超过 ${MAX_FILE_MB}MB：${file.name}`);
         continue;
       }
+      // getRandomValues also works on HTTP LAN deployments.
+      const uid = crypto.getRandomValues(new Uint32Array(4)).join('-');
       if (kind === 'invoice') {
-        invoices.push({ uid: crypto.randomUUID(), file });
+        invoices.push({ uid, file });
       } else {
         // default target: the most recently uploaded invoice of this batch
         attachments.push({
-          uid: crypto.randomUUID(),
+          uid,
           file,
           category: 'other',
           targetInvoiceId: !workflowId && newOptions.some(option => option.value === lastNewInvoiceId) ? lastNewInvoiceId : undefined,
